@@ -7,7 +7,6 @@ const fs = require('fs');
 const fsPromises = fs.promises;
 const path = require('path');
 const cors = require('cors');
-const libre = require('libreoffice-convert');
 const imagemagick = require('imagemagick');
 const { optimize } = require('svgo');
 const sevenZip = require('node-7z');
@@ -38,6 +37,7 @@ console.log('Environment variables:', {
   LIBREOFFICE_PATH: process.env.LIBREOFFICE_PATH,
 });
 
+// Enhanced CORS configuration
 app.use(cors({
   origin: (origin, callback) => {
     const allowedOrigins = [
@@ -45,6 +45,7 @@ app.use(cors({
       process.env.FRONTEND_URL || 'https://convertors-frontend.onrender.com'
     ].filter(Boolean);
     
+    console.log(`CORS: Request from origin ${origin || 'undefined'}`);
     if (!origin || allowedOrigins.includes(origin)) {
       console.log(`CORS: Allowing origin ${origin || 'undefined'}`);
       callback(null, true);
@@ -53,9 +54,14 @@ app.use(cors({
       callback(new Error('Not allowed by CORS'));
     }
   },
-  methods: ['GET', 'POST', 'DELETE'],
-  allowedHeaders: ['Content-Type'],
+  methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
+  optionsSuccessStatus: 204, // Return 204 for OPTIONS preflight
 }));
+
+// Handle OPTIONS preflight requests
+app.options('*', cors());
 
 const allFormats = [
   'bmp', 'eps', 'gif', 'ico', 'png', 'svg', 'tga', 'tiff', 'wbmp', 'webp', 'jpg', 'jpeg',
@@ -119,7 +125,7 @@ app.get('/status', (req, res) => {
   const checks = [
     {
       name: 'FFmpeg',
-      check: () => new Promise((resolve, reject) => {
+      check: () => new Promise((resolve) => {
         exec('ffmpeg -version', (err, stdout, stderr) => {
           if (err) {
             console.error('FFmpeg check failed:', err.message, stderr);
@@ -131,16 +137,16 @@ app.get('/status', (req, res) => {
       }),
     },
     {
-      name: 'LibreOffice',
+      name: 'unoconv',
       check: () => new Promise((resolve) => {
-        const librePath = process.env.LIBREOFFICE_PATH || '/usr/bin/soffice';
+        const librePath = process.env.LIBREOFFICE_PATH || '/usr/bin/unoconv';
         exec(`${librePath} --version`, (err, stdout, stderr) => {
           if (err) {
-            console.error('LibreOffice check failed:', err.message, stderr);
-            return resolve({ name: 'LibreOffice', status: 'Failed', details: err.message });
+            console.error('unoconv check failed:', err.message, stderr);
+            return resolve({ name: 'unoconv', status: 'Failed', details: err.message });
           }
-          console.log('LibreOffice version:', stdout.split('\n')[0]);
-          resolve({ name: 'LibreOffice', status: 'OK', details: stdout.split('\n')[0] });
+          console.log('unoconv version:', stdout.split('\n')[0]);
+          resolve({ name: 'unoconv', status: 'OK', details: stdout.split('\n')[0] });
         });
       }),
     },
@@ -243,7 +249,7 @@ app.post('/api/convert', upload.array('files', 5), async (req, res) => {
           break;
         case 'document':
           if (!process.env.LIBREOFFICE_PATH) {
-            throw new Error('LibreOffice path not set. Document conversion requires LIBREOFFICE_PATH in .env or system installation.');
+            throw new Error('unoconv path not set. Document conversion requires LIBREOFFICE_PATH in .env or system installation.');
           }
           await convertDocument(inputPath, outputPath, outputExt);
           break;
@@ -324,7 +330,7 @@ async function convertImage(inputPath, outputPath, format, subSection) {
   const sharpSupported = ['bmp', 'gif', 'png', 'tiff', 'webp', 'jpg', 'jpeg'];
   if (!imageFormats.includes(inputExt) && ['pdf', 'docx', 'txt', 'rtf', 'odt'].includes(inputExt)) {
     if (!process.env.LIBREOFFICE_PATH) {
-      throw new Error('LibreOffice path not set. Document-to-image conversion requires LIBREOFFICE_PATH in .env or system installation.');
+      throw new Error('unoconv path not set. Document-to-image conversion requires LIBREOFFICE_PATH in .env or system installation.');
     }
     const tempPdfPath = path.join(convertedDir, `temp_${Date.now()}.pdf`);
     try {
@@ -394,7 +400,7 @@ async function convertPdf(inputPath, outputPath, format) {
   const inputExt = path.extname(inputPath).toLowerCase().slice(1);
   if (inputExt !== 'pdf') {
     if (!process.env.LIBREOFFICE_PATH) {
-      throw new Error('LibreOffice path not set. Document-to-PDF conversion requires LIBREOFFICE_PATH in .env or system installation.');
+      throw new Error('unoconv path not set. Document-to-PDF conversion requires LIBREOFFICE_PATH in .env or system installation.');
     }
     const tempPdfPath = path.join(convertedDir, `temp_${Date.now()}.pdf`);
     try {
@@ -418,33 +424,8 @@ async function convertPdf(inputPath, outputPath, format) {
         resolve();
       });
     });
-  } else if (format === 'docx') {
-    if (!process.env.LIBREOFFICE_PATH) {
-      throw new Error('LibreOffice path not set. PDF-to-DOCX conversion requires LIBREOFFICE_PATH in .env or system installation.');
-    }
-    const pdfBuffer = await fsPromises.readFile(inputPath);
-    await new Promise((resolve, reject) => {
-      libre.soffice = process.env.LIBREOFFICE_PATH || '/usr/bin/soffice';
-      tmp.dir({ unsafeCleanup: true }, (err, tempDir, cleanupCallback) => {
-        if (err) return reject(new Error(`Failed to create temporary directory: ${err.message}`));
-        libre.convert(pdfBuffer, '.docx', { tmpDir: tempDir }, (err, docxBuffer) => {
-          if (err) {
-            cleanupCallback();
-            return reject(new Error(`PDF to DOCX conversion failed: ${err.message}`));
-          }
-          fsPromises.writeFile(outputPath, docxBuffer)
-            .then(() => {
-              cleanupCallback();
-              console.log(`PDF to DOCX conversion completed: ${outputPath}`);
-              resolve();
-            })
-            .catch((writeErr) => {
-              cleanupCallback();
-              reject(writeErr);
-            });
-        });
-      });
-    });
+  } else if (['docx', 'txt', 'rtf', 'odt'].includes(format)) {
+    await convertDocument(inputPath, outputPath, format);
   } else {
     throw new Error(`Unsupported PDF output format: ${format}`);
   }
@@ -452,7 +433,7 @@ async function convertPdf(inputPath, outputPath, format) {
 
 async function convertDocument(inputPath, outputPath, format) {
   if (!process.env.LIBREOFFICE_PATH) {
-    throw new Error('LibreOffice path not set. Document conversion requires LIBREOFFICE_PATH in .env or system installation.');
+    throw new Error('unoconv path not set. Document conversion requires LIBREOFFICE_PATH in .env or system installation.');
   }
   const inputExt = path.extname(inputPath).toLowerCase().slice(1);
   const supportedDocumentFormats = ['docx', 'pdf', 'txt', 'rtf', 'odt'];
@@ -471,28 +452,15 @@ async function convertDocument(inputPath, outputPath, format) {
   if (!supportedDocumentFormats.includes(format)) {
     throw new Error(`Unsupported output document format: ${format}`);
   }
-  const inputBuffer = await fsPromises.readFile(inputPath);
-  await new Promise((resolve, reject) => {
-    libre.soffice = process.env.LIBREOFFICE_PATH;
-    tmp.dir({ unsafeCleanup: true }, (err, tempDir, cleanupCallback) => {
-      if (err) return reject(new Error(`Failed to create temporary directory: ${err.message}`));
-      libre.convert(inputBuffer, `.${format}`, { tmpDir: tempDir }, (err, buffer) => {
-        if (err) {
-          cleanupCallback();
-          console.error(`Document conversion failed: ${err.message}`);
-          return reject(new Error(`Document conversion failed: ${err.message}`));
-        }
-        fsPromises.writeFile(outputPath, buffer)
-          .then(() => {
-            cleanupCallback();
-            console.log(`Document conversion completed: ${outputPath}`);
-            resolve();
-          })
-          .catch((writeErr) => {
-            cleanupCallback();
-            reject(writeErr);
-          });
-      });
+  return new Promise((resolve, reject) => {
+    const librePath = process.env.LIBREOFFICE_PATH || '/usr/bin/unoconv';
+    exec(`${librePath} -f ${format} -o "${outputPath}" "${inputPath}"`, (err, stdout, stderr) => {
+      if (err) {
+        console.error(`Document conversion failed: ${err.message}`, { stdout, stderr });
+        return reject(new Error(`Document conversion failed: ${err.message}`));
+      }
+      console.log(`Document conversion completed: ${outputPath}`);
+      resolve();
     });
   });
 }
@@ -614,6 +582,6 @@ async function cleanupFiles(filePaths) {
   await Promise.all(cleanupPromises);
 }
 
-app.listen(port, () => {
-  console.log(`Server running on http://localhost:${port}`);
+app.listen(port, '0.0.0.0', () => {
+  console.log(`Server running on http://0.0.0.0:${port}`);
 });

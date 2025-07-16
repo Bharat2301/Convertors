@@ -1,8 +1,24 @@
 FROM node:18-bullseye
-RUN apt-get update && apt-get install -y ffmpeg libreoffice imagemagick calibre
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    libreoffice \
+    imagemagick \
+    calibre \
+    unoconv \
+    p7zip-full \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY package*.json ./
 RUN npm install
 COPY . .
-EXPOSE 5001
-CMD ["npm", "run", "dev"]
+
+# Set environment variables
+ENV PORT=5001
+ENV LIBREOFFICE_PATH=/usr/bin/unoconv
+ENV FRONTEND_URL=https://convertors-frontend.onrender.com
+
+EXPOSE $PORT
+CMD ["node", "server.js"]
