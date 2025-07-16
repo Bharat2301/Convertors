@@ -39,7 +39,20 @@ console.log('Environment variables:', {
 });
 
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  origin: (origin, callback) => {
+    const allowedOrigins = [
+      'http://localhost:5173',
+      process.env.FRONTEND_URL || 'https://convertors-frontend.onrender.com'
+    ].filter(Boolean);
+    
+    if (!origin || allowedOrigins.includes(origin)) {
+      console.log(`CORS: Allowing origin ${origin || 'undefined'}`);
+      callback(null, true);
+    } else {
+      console.warn(`CORS: Blocking origin ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   methods: ['GET', 'POST', 'DELETE'],
   allowedHeaders: ['Content-Type'],
 }));
@@ -96,24 +109,76 @@ const upload = multer({
 });
 
 app.get('/health', (req, res) => {
-  console.log('Health check requested');
+  console.log('Health check requested from:', req.get('origin'));
   res.status(200).json({ status: 'OK' });
 });
 
-// Debug route to verify FFmpeg installation
-app.get('/ffmpeg-version', (req, res) => {
-  exec('ffmpeg -version', (err, stdout, stderr) => {
-    if (err) {
-      console.error('FFmpeg version check failed:', err.message, stderr);
-      return res.status(500).json({ error: 'FFmpeg not found', details: err.message });
-    }
-    console.log('FFmpeg version:', stdout);
-    res.status(200).send(stdout);
+// Debug route to verify dependency status
+app.get('/status', (req, res) => {
+  console.log('Status check requested from:', req.get('origin'));
+  const checks = [
+    {
+      name: 'FFmpeg',
+      check: () => new Promise((resolve, reject) => {
+        exec('ffmpeg -version', (err, stdout, stderr) => {
+          if (err) {
+            console.error('FFmpeg check failed:', err.message, stderr);
+            return resolve({ name: 'FFmpeg', status: 'Failed', details: err.message });
+          }
+          console.log('FFmpeg version:', stdout.split('\n')[0]);
+          resolve({ name: 'FFmpeg', status: 'OK', details: stdout.split('\n')[0] });
+        });
+      }),
+    },
+    {
+      name: 'LibreOffice',
+      check: () => new Promise((resolve) => {
+        const librePath = process.env.LIBREOFFICE_PATH || '/usr/bin/soffice';
+        exec(`${librePath} --version`, (err, stdout, stderr) => {
+          if (err) {
+            console.error('LibreOffice check failed:', err.message, stderr);
+            return resolve({ name: 'LibreOffice', status: 'Failed', details: err.message });
+          }
+          console.log('LibreOffice version:', stdout.split('\n')[0]);
+          resolve({ name: 'LibreOffice', status: 'OK', details: stdout.split('\n')[0] });
+        });
+      }),
+    },
+    {
+      name: 'ImageMagick',
+      check: () => new Promise((resolve) => {
+        exec('convert -version', (err, stdout, stderr) => {
+          if (err) {
+            console.error('ImageMagick check failed:', err.message, stderr);
+            return resolve({ name: 'ImageMagick', status: 'Failed', details: err.message });
+          }
+          console.log('ImageMagick version:', stdout.split('\n')[0]);
+          resolve({ name: 'ImageMagick', status: 'OK', details: stdout.split('\n')[0] });
+        });
+      }),
+    },
+    {
+      name: 'Calibre',
+      check: () => new Promise((resolve) => {
+        exec('ebook-convert --version', (err, stdout, stderr) => {
+          if (err) {
+            console.error('Calibre check failed:', err.message, stderr);
+            return resolve({ name: 'Calibre', status: 'Failed', details: err.message });
+          }
+          console.log('Calibre version:', stdout.split('\n')[0]);
+          resolve({ name: 'Calibre', status: 'OK', details: stdout.split('\n')[0] });
+        });
+      }),
+    },
+  ];
+
+  Promise.all(checks.map(c => c.check())).then(results => {
+    res.status(200).json({ status: 'OK', dependencies: results });
   });
 });
 
 app.post('/api/convert', upload.array('files', 5), async (req, res) => {
-  console.log('Received /api/convert request', {
+  console.log('Received /api/convert request from:', req.get('origin'), {
     files: req.files ? req.files.map(f => ({ name: f.originalname, size: f.size, path: f.path })) : [],
     formats: req.body.formats,
   });
@@ -222,7 +287,7 @@ app.post('/api/convert', upload.array('files', 5), async (req, res) => {
 app.get('/converted/:filename', async (req, res) => {
   const filename = req.params.filename;
   const filePath = path.join(convertedDir, filename);
-  console.log(`Serving file: ${filePath}`);
+  console.log(`Serving file: ${filePath} to ${req.get('origin')}`);
   try {
     await fsPromises.access(filePath);
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -243,6 +308,7 @@ app.get('/converted/:filename', async (req, res) => {
 app.delete('/api/delete/:filename', async (req, res) => {
   const filename = req.params.filename;
   const filePath = path.join(convertedDir, filename);
+  console.log(`Delete request for ${filePath} from ${req.get('origin')}`);
   try {
     await cleanupFiles([filePath]);
     res.status(200).json({ message: `File ${filename} deleted successfully.` });
@@ -527,6 +593,10 @@ async function cleanupFiles(filePaths) {
         console.log(`Deleted file: ${filePath}`);
         return;
       } catch (err) {
+        if (err.code === 'ENOENT') {
+          console.log(`File not found for deletion: ${filePath}`);
+          return;
+        }
         if (err.code === 'EPERM') {
           attempts++;
           console.warn(`EPERM error on attempt ${attempts} for ${filePath}. Retrying in ${retryDelay}ms...`);
