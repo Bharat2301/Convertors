@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ debug: true }); // Enable dotenv debug logging
 const express = require('express');
 const multer = require('multer');
 const ffmpeg = require('fluent-ffmpeg');
@@ -57,7 +57,7 @@ app.use(cors({
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
-  optionsSuccessStatus: 204, // Return 204 for OPTIONS preflight
+  optionsSuccessStatus: 204,
 }));
 
 // Handle OPTIONS preflight requests
@@ -114,12 +114,30 @@ const upload = multer({
   },
 });
 
+// Debug middleware to log all registered routes
+app.use((req, res, next) => {
+  console.log(`Route requested: ${req.method} ${req.path}`);
+  next();
+});
+
+// Register routes with logging
+const routes = [
+  { method: 'get', path: '/health' },
+  { method: 'get', path: '/status' },
+  { method: 'post', path: '/api/convert' },
+  { method: 'get', path: '/converted/:filename' },
+  { method: 'delete', path: '/api/delete/:filename' },
+];
+
+routes.forEach(({ method, path }) => {
+  console.log(`Registering route: ${method.toUpperCase()} ${path}`);
+});
+
 app.get('/health', (req, res) => {
   console.log('Health check requested from:', req.get('origin'));
   res.status(200).json({ status: 'OK' });
 });
 
-// Debug route to verify dependency status
 app.get('/status', (req, res) => {
   console.log('Status check requested from:', req.get('origin'));
   const checks = [

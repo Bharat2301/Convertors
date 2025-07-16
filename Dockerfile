@@ -19,6 +19,7 @@ COPY . .
 ENV PORT=5001
 ENV LIBREOFFICE_PATH=/usr/bin/unoconv
 ENV FRONTEND_URL=https://convertors-frontend.onrender.com
+ENV NODE_ENV=production
 
 EXPOSE $PORT
 CMD ["node", "server.js"]
