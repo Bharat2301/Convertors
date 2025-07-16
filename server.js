@@ -38,29 +38,14 @@ console.log('Environment variables:', {
   LIBREOFFICE_PATH: process.env.LIBREOFFICE_PATH,
 });
 
-// Handle CORS preflight requests
-app.options('*', cors());
+// Simplified CORS configuration
 app.use(cors({
-  origin: (origin, callback) => {
-    const allowedOrigins = [
-      'http://localhost:5173',
-      process.env.FRONTEND_URL || 'https://convertors-frontend.onrender.com'
-    ].filter(Boolean);
-    
-    if (!origin || allowedOrigins.includes(origin)) {
-      console.log(`CORS: Allowing origin ${origin || 'undefined'}`);
-      callback(null, true);
-    } else {
-      console.warn(`CORS: Blocking origin ${origin}`);
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
+  origin: ['http://localhost:5173', process.env.FRONTEND_URL].filter(Boolean),
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type'],
   exposedHeaders: ['Content-Disposition'],
-  credentials: false,
-  preflightContinue: false,
 }));
+app.options('*', cors());
 
 const allFormats = [
   'bmp', 'eps', 'gif', 'ico', 'png', 'svg', 'tga', 'tiff', 'wbmp', 'webp', 'jpg', 'jpeg',
@@ -118,7 +103,6 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
-// Debug route to verify dependency status
 app.get('/status', (req, res) => {
   console.log('Status check requested from:', req.get('origin'));
   const checks = [
@@ -626,6 +610,6 @@ async function cleanupFiles(filePaths) {
   await Promise.all(cleanupPromises);
 }
 
-app.listen(port, () => {
-  console.log(`Server running on http://localhost:${port}`);
+app.listen(port, '0.0.0.0', () => {
+  console.log(`Server running on http://0.0.0.0:${port}`);
 });
