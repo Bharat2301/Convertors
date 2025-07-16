@@ -35,6 +35,7 @@ console.log('Environment variables:', {
   PORT: process.env.PORT,
   FRONTEND_URL: process.env.FRONTEND_URL,
   CONVERSION_TIMEOUT: process.env.CONVERSION_TIMEOUT,
+  LIBREOFFICE_PATH: process.env.LIBREOFFICE_PATH,
 });
 
 app.use(cors({
@@ -99,11 +100,21 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'OK' });
 });
 
+// Debug route to verify FFmpeg installation
+app.get('/ffmpeg-version', (req, res) => {
+  exec('ffmpeg -version', (err, stdout, stderr) => {
+    if (err) {
+      console.error('FFmpeg version check failed:', err.message, stderr);
+      return res.status(500).json({ error: 'FFmpeg not found', details: err.message });
+    }
+    console.log('FFmpeg version:', stdout);
+    res.status(200).send(stdout);
+  });
+});
+
 app.post('/api/convert', upload.array('files', 5), async (req, res) => {
   console.log('Received /api/convert request', {
-    files
-
-: req.files ? req.files.map(f => ({ name: f.originalname, size: f.size, path: f.path })) : [],
+    files: req.files ? req.files.map(f => ({ name: f.originalname, size: f.size, path: f.path })) : [],
     formats: req.body.formats,
   });
   let tempFiles = req.files ? req.files.map(f => f.path) : [];
@@ -396,7 +407,7 @@ async function convertDocument(inputPath, outputPath, format) {
   }
   const inputBuffer = await fsPromises.readFile(inputPath);
   await new Promise((resolve, reject) => {
-    libre.soffice = process.env.LIBREOFFICE_PATH || '/usr/bin/soffice';
+    libre.soffice = process.env.LIBREOFFICE_PATH;
     tmp.dir({ unsafeCleanup: true }, (err, tempDir, cleanupCallback) => {
       if (err) return reject(new Error(`Failed to create temporary directory: ${err.message}`));
       libre.convert(inputBuffer, `.${format}`, { tmpDir: tempDir }, (err, buffer) => {
@@ -437,7 +448,7 @@ async function convertMedia(inputPath, outputPath, format, inputExt) {
         .inputFormat('lavfi')
         .videoCodec('mpeg4')
         .audioCodec('aac')
-        .outputOptions('-shortest');
+        .outputOptions('-shortest', '-threads 1', '-preset ultrafast');
     } else {
       if (format === 'aac') {
         ffmpegInstance.audioCodec('aac');
@@ -457,14 +468,16 @@ async function convertMedia(inputPath, outputPath, format, inputExt) {
     }
 
     ffmpegInstance
+      .outputOptions('-threads 1', '-preset ultrafast')
       .toFormat(format)
       .on('start', (cmd) => console.log(`FFmpeg command: ${cmd}`))
+      .on('progress', (progress) => console.log(`Processing: ${progress.percent}% done`))
       .on('end', () => {
         console.log(`Media conversion completed: ${outputPath}`);
         resolve();
       })
-      .on('error', (err) => {
-        console.error(`Media conversion error for ${format}: ${err.message}`);
+      .on('error', (err, stdout, stderr) => {
+        console.error(`Media conversion error for ${format}: ${err.message}`, { stdout, stderr });
         reject(new Error(`Media conversion failed: ${err.message}`));
       })
       .save(outputPath);
@@ -491,9 +504,9 @@ async function convertArchive(inputPath, outputPath, format) {
 
 async function convertEbook(inputPath, outputPath, format) {
   return new Promise((resolve, reject) => {
-    exec(`ebook-convert "${inputPath}" "${outputPath}"`, (err) => {
+    exec(`ebook-convert "${inputPath}" "${outputPath}"`, (err, stdout, stderr) => {
       if (err) {
-        console.error(`Ebook conversion error: ${err.message}`);
+        console.error(`Ebook conversion error: ${err.message}`, { stdout, stderr });
         return reject(new Error(`Ebook conversion failed: ${err.message}`));
       }
       console.log(`Ebook conversion completed: ${outputPath}`);
