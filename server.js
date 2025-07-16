@@ -63,8 +63,9 @@ const supportedFormats = {
   ebook: allFormats,
 };
 
-const uploadsDir = path.join(__dirname, 'Uploads');
-const convertedDir = path.join(__dirname, 'converted');
+// Use /app for Render's filesystem
+const uploadsDir = path.join('/app', 'Uploads');
+const convertedDir = path.join('/app', 'converted');
 
 // Ensure directories exist
 (async () => {
@@ -100,7 +101,9 @@ app.get('/health', (req, res) => {
 
 app.post('/api/convert', upload.array('files', 5), async (req, res) => {
   console.log('Received /api/convert request', {
-    files: req.files ? req.files.map(f => ({ name: f.originalname, size: f.size, path: f.path })) : [],
+    files
+
+: req.files ? req.files.map(f => ({ name: f.originalname, size: f.size, path: f.path })) : [],
     formats: req.body.formats,
   });
   let tempFiles = req.files ? req.files.map(f => f.path) : [];
