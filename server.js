@@ -34,10 +34,12 @@ const port = process.env.PORT || 5001;
 console.log('Environment variables:', {
   PORT: process.env.PORT,
   FRONTEND_URL: process.env.FRONTEND_URL,
-  CONVERSION_TIMEOUT: process.env.CONVERSION_TIMEOUT,
+  CONVERSION_TIMEOUT: process.env.CONVERSION_TIMEOUT || '30000',
   LIBREOFFICE_PATH: process.env.LIBREOFFICE_PATH,
 });
 
+// Handle CORS preflight requests
+app.options('*', cors());
 app.use(cors({
   origin: (origin, callback) => {
     const allowedOrigins = [
@@ -53,8 +55,11 @@ app.use(cors({
       callback(new Error('Not allowed by CORS'));
     }
   },
-  methods: ['GET', 'POST', 'DELETE'],
+  methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type'],
+  exposedHeaders: ['Content-Disposition'],
+  credentials: false,
+  preflightContinue: false,
 }));
 
 const allFormats = [
@@ -110,7 +115,7 @@ const upload = multer({
 
 app.get('/health', (req, res) => {
   console.log('Health check requested from:', req.get('origin'));
-  res.status(200).json({ status: 'OK' });
+  res.status(200).json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
 // Debug route to verify dependency status
@@ -119,7 +124,7 @@ app.get('/status', (req, res) => {
   const checks = [
     {
       name: 'FFmpeg',
-      check: () => new Promise((resolve, reject) => {
+      check: () => new Promise((resolve) => {
         exec('ffmpeg -version', (err, stdout, stderr) => {
           if (err) {
             console.error('FFmpeg check failed:', err.message, stderr);
@@ -207,6 +212,7 @@ app.post('/api/convert', upload.array('files', 5), async (req, res) => {
       });
     }
     const outputFiles = [];
+    const conversionTimeout = parseInt(process.env.CONVERSION_TIMEOUT) || 30000;
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       const formatInfo = formats[i];
@@ -236,33 +242,38 @@ app.post('/api/convert', upload.array('files', 5), async (req, res) => {
         ['pdf', 'docx', 'txt', 'rtf', 'odt'].includes(outputExt) ? 'document' :
           ['mp3', 'wav', 'aac', 'flac', 'ogg', 'opus', 'wma', 'aiff', 'm4v', 'mmf', '3g2'].includes(outputExt) ? 'audio' :
             ['mp4', 'avi', 'mov', 'webm', 'mkv', 'flv', 'wmv'].includes(outputExt) ? 'video' : formatInfo.type;
-      switch (outputType) {
-        case 'image':
-        case 'compressor':
-          await convertImage(inputPath, outputPath, outputExt, formatInfo.subSection);
-          break;
-        case 'document':
-          if (!process.env.LIBREOFFICE_PATH) {
-            throw new Error('LibreOffice path not set. Document conversion requires LIBREOFFICE_PATH in .env or system installation.');
+      await Promise.race([
+        (async () => {
+          switch (outputType) {
+            case 'image':
+            case 'compressor':
+              await convertImage(inputPath, outputPath, outputExt, formatInfo.subSection);
+              break;
+            case 'document':
+              if (!process.env.LIBREOFFICE_PATH) {
+                throw new Error('LibreOffice path not set. Document conversion requires LIBREOFFICE_PATH in .env or system installation.');
+              }
+              await convertDocument(inputPath, outputPath, outputExt);
+              break;
+            case 'pdfs':
+              await convertPdf(inputPath, outputPath, outputExt);
+              break;
+            case 'audio':
+            case 'video':
+              await convertMedia(inputPath, outputPath, outputExt, inputExt);
+              break;
+            case 'archive':
+              await convertArchive(inputPath, outputPath, outputExt);
+              break;
+            case 'ebook':
+              await convertEbook(inputPath, outputPath, outputExt);
+              break;
+            default:
+              throw new Error(`Unsupported conversion type: ${outputType}`);
           }
-          await convertDocument(inputPath, outputPath, outputExt);
-          break;
-        case 'pdfs':
-          await convertPdf(inputPath, outputPath, outputExt);
-          break;
-        case 'audio':
-        case 'video':
-          await convertMedia(inputPath, outputPath, outputExt, inputExt);
-          break;
-        case 'archive':
-          await convertArchive(inputPath, outputPath, outputExt);
-          break;
-        case 'ebook':
-          await convertEbook(inputPath, outputPath, outputExt);
-          break;
-        default:
-          throw new Error(`Unsupported conversion type: ${outputType}`);
-      }
+        })(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Conversion timed out')), conversionTimeout)),
+      ]);
       outputFiles.push({
         path: outputPath,
         name: path.basename(outputPath),
@@ -514,7 +525,7 @@ async function convertMedia(inputPath, outputPath, format, inputExt) {
         .inputFormat('lavfi')
         .videoCodec('mpeg4')
         .audioCodec('aac')
-        .outputOptions('-shortest', '-threads 1', '-preset ultrafast');
+        .outputOptions('-shortest', '-threads 1', '-preset ultrafast', '-vf scale=320:240');
     } else {
       if (format === 'aac') {
         ffmpegInstance.audioCodec('aac');
@@ -529,7 +540,8 @@ async function convertMedia(inputPath, outputPath, format, inputExt) {
       } else if (supportedVideoFormats.includes(format)) {
         ffmpegInstance
           .videoCodec('libx264')
-          .audioCodec('aac');
+          .audioCodec('aac')
+          .outputOptions('-vf scale=320:240');
       }
     }
 

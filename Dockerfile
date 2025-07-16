@@ -1,4 +1,4 @@
-FROM node:18
+FROM node:18-bullseye
 RUN apt-get update && apt-get install -y ffmpeg libreoffice imagemagick calibre
 WORKDIR /app
 COPY package*.json ./
