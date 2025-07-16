@@ -34,18 +34,28 @@ const port = process.env.PORT || 5001;
 console.log('Environment variables:', {
   PORT: process.env.PORT,
   FRONTEND_URL: process.env.FRONTEND_URL,
-  CONVERSION_TIMEOUT: process.env.CONVERSION_TIMEOUT || '30000',
+  CONVERSION_TIMEOUT: process.env.CONVERSION_TIMEOUT,
   LIBREOFFICE_PATH: process.env.LIBREOFFICE_PATH,
 });
 
-// Simplified CORS configuration
 app.use(cors({
-  origin: ['http://localhost:5173', process.env.FRONTEND_URL].filter(Boolean),
-  methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+  origin: (origin, callback) => {
+    const allowedOrigins = [
+      'http://localhost:5173',
+      process.env.FRONTEND_URL || 'https://convertors-frontend.onrender.com'
+    ].filter(Boolean);
+    
+    if (!origin || allowedOrigins.includes(origin)) {
+      console.log(`CORS: Allowing origin ${origin || 'undefined'}`);
+      callback(null, true);
+    } else {
+      console.warn(`CORS: Blocking origin ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  methods: ['GET', 'POST', 'DELETE'],
   allowedHeaders: ['Content-Type'],
-  exposedHeaders: ['Content-Disposition'],
 }));
-app.options('*', cors());
 
 const allFormats = [
   'bmp', 'eps', 'gif', 'ico', 'png', 'svg', 'tga', 'tiff', 'wbmp', 'webp', 'jpg', 'jpeg',
@@ -100,15 +110,16 @@ const upload = multer({
 
 app.get('/health', (req, res) => {
   console.log('Health check requested from:', req.get('origin'));
-  res.status(200).json({ status: 'OK', timestamp: new Date().toISOString() });
+  res.status(200).json({ status: 'OK' });
 });
 
+// Debug route to verify dependency status
 app.get('/status', (req, res) => {
   console.log('Status check requested from:', req.get('origin'));
   const checks = [
     {
       name: 'FFmpeg',
-      check: () => new Promise((resolve) => {
+      check: () => new Promise((resolve, reject) => {
         exec('ffmpeg -version', (err, stdout, stderr) => {
           if (err) {
             console.error('FFmpeg check failed:', err.message, stderr);
@@ -196,7 +207,6 @@ app.post('/api/convert', upload.array('files', 5), async (req, res) => {
       });
     }
     const outputFiles = [];
-    const conversionTimeout = parseInt(process.env.CONVERSION_TIMEOUT) || 30000;
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       const formatInfo = formats[i];
@@ -226,38 +236,33 @@ app.post('/api/convert', upload.array('files', 5), async (req, res) => {
         ['pdf', 'docx', 'txt', 'rtf', 'odt'].includes(outputExt) ? 'document' :
           ['mp3', 'wav', 'aac', 'flac', 'ogg', 'opus', 'wma', 'aiff', 'm4v', 'mmf', '3g2'].includes(outputExt) ? 'audio' :
             ['mp4', 'avi', 'mov', 'webm', 'mkv', 'flv', 'wmv'].includes(outputExt) ? 'video' : formatInfo.type;
-      await Promise.race([
-        (async () => {
-          switch (outputType) {
-            case 'image':
-            case 'compressor':
-              await convertImage(inputPath, outputPath, outputExt, formatInfo.subSection);
-              break;
-            case 'document':
-              if (!process.env.LIBREOFFICE_PATH) {
-                throw new Error('LibreOffice path not set. Document conversion requires LIBREOFFICE_PATH in .env or system installation.');
-              }
-              await convertDocument(inputPath, outputPath, outputExt);
-              break;
-            case 'pdfs':
-              await convertPdf(inputPath, outputPath, outputExt);
-              break;
-            case 'audio':
-            case 'video':
-              await convertMedia(inputPath, outputPath, outputExt, inputExt);
-              break;
-            case 'archive':
-              await convertArchive(inputPath, outputPath, outputExt);
-              break;
-            case 'ebook':
-              await convertEbook(inputPath, outputPath, outputExt);
-              break;
-            default:
-              throw new Error(`Unsupported conversion type: ${outputType}`);
+      switch (outputType) {
+        case 'image':
+        case 'compressor':
+          await convertImage(inputPath, outputPath, outputExt, formatInfo.subSection);
+          break;
+        case 'document':
+          if (!process.env.LIBREOFFICE_PATH) {
+            throw new Error('LibreOffice path not set. Document conversion requires LIBREOFFICE_PATH in .env or system installation.');
           }
-        })(),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Conversion timed out')), conversionTimeout)),
-      ]);
+          await convertDocument(inputPath, outputPath, outputExt);
+          break;
+        case 'pdfs':
+          await convertPdf(inputPath, outputPath, outputExt);
+          break;
+        case 'audio':
+        case 'video':
+          await convertMedia(inputPath, outputPath, outputExt, inputExt);
+          break;
+        case 'archive':
+          await convertArchive(inputPath, outputPath, outputExt);
+          break;
+        case 'ebook':
+          await convertEbook(inputPath, outputPath, outputExt);
+          break;
+        default:
+          throw new Error(`Unsupported conversion type: ${outputType}`);
+      }
       outputFiles.push({
         path: outputPath,
         name: path.basename(outputPath),
@@ -509,7 +514,7 @@ async function convertMedia(inputPath, outputPath, format, inputExt) {
         .inputFormat('lavfi')
         .videoCodec('mpeg4')
         .audioCodec('aac')
-        .outputOptions('-shortest', '-threads 1', '-preset ultrafast', '-vf scale=320:240');
+        .outputOptions('-shortest', '-threads 1', '-preset ultrafast');
     } else {
       if (format === 'aac') {
         ffmpegInstance.audioCodec('aac');
@@ -524,8 +529,7 @@ async function convertMedia(inputPath, outputPath, format, inputExt) {
       } else if (supportedVideoFormats.includes(format)) {
         ffmpegInstance
           .videoCodec('libx264')
-          .audioCodec('aac')
-          .outputOptions('-vf scale=320:240');
+          .audioCodec('aac');
       }
     }
 
@@ -610,6 +614,6 @@ async function cleanupFiles(filePaths) {
   await Promise.all(cleanupPromises);
 }
 
-app.listen(port, '0.0.0.0', () => {
-  console.log(`Server running on http://0.0.0.0:${port}`);
+app.listen(port, () => {
+  console.log(`Server running on http://localhost:${port}`);
 });
