@@ -74,22 +74,20 @@ const uploadsDir = path.join('/app', 'Uploads');
 const convertedDir = path.join('/app', 'converted');
 const tempDir = path.join('/app', 'tmp');
 
-// Ensure directories exist with correct permissions
+// Verify directory accessibility at startup
 (async () => {
   try {
     for (const dir of [uploadsDir, convertedDir, tempDir, '/app/tmp/officeuser-runtime']) {
       try {
-        await fsPromises.mkdir(dir, { recursive: true, mode: 0o777 });
-        await fsPromises.chmod(dir, 0o777);
         await fsPromises.access(dir, fs.constants.R_OK | fs.constants.W_OK);
-        console.log(`Directory created and verified: ${dir}`);
+        console.log(`Directory verified: ${dir}`);
       } catch (err) {
-        console.error(`Failed to set up directory ${dir}: ${err.message}`);
-        throw new Error(`Directory setup failed for ${dir}: ${err.message}`);
+        console.error(`Failed to access directory ${dir}: ${err.message}`);
+        throw new Error(`Directory access failed for ${dir}: ${err.message}`);
       }
     }
   } catch (err) {
-    console.error('Error setting up directories:', err.message);
+    console.error('Error verifying directories:', err.message);
     process.exit(1);
   }
 })();

@@ -14,13 +14,14 @@ RUN apt-get update && apt-get install -y \
 
 # Create directories and set permissions as root
 RUN mkdir -p /app/Uploads /app/converted /app/tmp /app/tmp/officeuser-runtime \
+    && chown -R 1001:1001 /app /app/Uploads /app/converted /app/tmp /app/tmp/officeuser-runtime \
     && chmod -R 777 /app /app/Uploads /app/converted /app/tmp /app/tmp/officeuser-runtime
 
 # Create a non-root user
 RUN useradd -m -u 1001 -s /bin/bash officeuser || echo "User officeuser creation failed, using existing user" \
     && mkdir -p /home/officeuser \
-    && chown -R officeuser:officeuser /home/officeuser /app \
-    && chmod -R 777 /home/officeuser /app
+    && chown -R officeuser:officeuser /home/officeuser \
+    && chmod -R 777 /home/officeuser
 
 # Set working directory
 WORKDIR /app
