@@ -74,20 +74,26 @@ const uploadsDir = path.join('/app', 'Uploads');
 const convertedDir = path.join('/app', 'converted');
 const tempDir = path.join('/app', 'tmp');
 
-// Verify directory accessibility at startup
+// Fix and verify directory permissions at startup
 (async () => {
   try {
-    for (const dir of [uploadsDir, convertedDir, tempDir, '/app/tmp/officeuser-runtime']) {
+    // Ensure directories exist and have correct permissions
+    const dirs = [uploadsDir, convertedDir, tempDir, '/app/tmp/officeuser-runtime'];
+    for (const dir of dirs) {
+      await fsPromises.mkdir(dir, { recursive: true });
       try {
-        await fsPromises.access(dir, fs.constants.R_OK | fs.constants.W_OK);
-        console.log(`Directory verified: ${dir}`);
-      } catch (err) {
-        console.error(`Failed to access directory ${dir}: ${err.message}`);
-        throw new Error(`Directory access failed for ${dir}: ${err.message}`);
+        await execPromise(`chown -R 1001:1001 ${dir}`);
+        await execPromise(`chmod -R 777 ${dir}`);
+        console.log(`Fixed permissions for: ${dir}`);
+      } catch (permErr) {
+        console.warn(`Failed to set permissions for ${dir}: ${permErr.message}. Continuing with verification.`);
       }
+      // Verify permissions
+      await fsPromises.access(dir, fs.constants.R_OK | fs.constants.W_OK);
+      console.log(`Directory verified: ${dir}`);
     }
   } catch (err) {
-    console.error('Error verifying directories:', err.message);
+    console.error('Error setting up directories:', err.message);
     process.exit(1);
   }
 })();
@@ -359,10 +365,21 @@ async function convertImage(inputPath, outputPath, format, subSection) {
   const imageFormats = ['bmp', 'eps', 'gif', 'ico', 'png', 'svg', 'tga', 'tiff', 'wbmp', 'webp', 'jpg', 'jpeg'];
   const inputExt = path.extname(inputPath).toLowerCase().slice(1);
   const sharpSupported = ['bmp', 'gif', 'png', 'tiff', 'webp', 'jpg', 'jpeg'];
-  if (!imageFormats.includes(inputExt) && ['pdf', 'txt', 'rtf', 'odt'].includes(inputExt)) {
+  
+  if (!imageFormats.includes(inputExt) && ['txt', 'rtf', 'odt'].includes(inputExt)) {
+    // Convert text-based files to PDF first
     const tempPdfPath = path.join(tempDir, `temp_${Date.now()}.pdf`);
     try {
-      await fsPromises.copyFile(inputPath, tempPdfPath); // Direct copy for PDF input
+      await new Promise((resolve, reject) => {
+        exec(`libreoffice --headless --convert-to pdf --outdir ${tempDir} ${inputPath}`, (err, stdout, stderr) => {
+          if (err) {
+            console.error(`Text to PDF conversion failed: ${err.message}`, stderr);
+            return reject(new Error(`Text to PDF conversion failed: ${err.message}`));
+          }
+          console.log(`Text to PDF conversion completed: ${tempPdfPath}`);
+          resolve();
+        });
+      });
       await convertImage(tempPdfPath, outputPath, format, subSection);
       await fsPromises.unlink(tempPdfPath).catch(err => console.error(`Error cleaning up temp PDF: ${err.message}`));
     } catch (err) {
@@ -371,6 +388,7 @@ async function convertImage(inputPath, outputPath, format, subSection) {
     }
     return;
   }
+  
   if (imageFormats.includes(format)) {
     if (subSection === 'compressor' && format === 'svg') {
       const svgData = await fsPromises.readFile(inputPath, 'utf-8');

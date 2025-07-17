@@ -1,11 +1,11 @@
-# Use Node.js 18 based on Debian Bullseye as the base image
 FROM node:18-bullseye
 
-# Install system dependencies required for FFmpeg, Ghostscript, and Calibre
+# Install system dependencies required for FFmpeg, Ghostscript, Calibre, and LibreOffice
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     ghostscript \
     calibre \
+    libreoffice \
     p7zip-full \
     pdftohtml \
     poppler-utils \
@@ -13,9 +13,10 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Create directories and set permissions as root
-RUN mkdir -p /app/Uploads /app/converted /app/tmp /app/tmp/officeuser-runtime \
+RUN mkdir -p /app /app/Uploads /app/converted /app/tmp /app/tmp/officeuser-runtime \
     && chown -R 1001:1001 /app /app/Uploads /app/converted /app/tmp /app/tmp/officeuser-runtime \
-    && chmod -R 777 /app /app/Uploads /app/converted /app/tmp /app/tmp/officeuser-runtime
+    && chmod -R 777 /app /app/Uploads /app/converted /app/tmp /app/tmp/officeuser-runtime \
+    && ls -ld /app /app/Uploads /app/converted /app/tmp /app/tmp/officeuser-runtime
 
 # Create a non-root user
 RUN useradd -m -u 1001 -s /bin/bash officeuser || echo "User officeuser creation failed, using existing user" \
