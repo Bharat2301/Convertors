@@ -14,16 +14,11 @@ RUN apt-get update && apt-get install -y \
 
 # Create directories and set permissions as root
 RUN mkdir -p /app /app/Uploads /app/converted /app/tmp /app/tmp/officeuser-runtime \
-    && chown -R 1001:1001 /app /app/Uploads /app/converted /app/tmp /app/tmp/officeuser-runtime \
-    && chmod -R 777 /app /app/Uploads /app/converted /app/tmp /app/tmp/officeuser-runtime \
+    && chown -R node:node /app /app/Uploads /app/converted /app/tmp /app/tmp/officeuser-runtime \
+    && chmod -R 775 /app /app/Uploads /app/converted /app/tmp /app/tmp/officeuser-runtime \
     && ls -ld /app /app/Uploads /app/converted /app/tmp /app/tmp/officeuser-runtime
 
-# Create a non-root user
-RUN useradd -m -u 1001 -s /bin/bash officeuser || echo "User officeuser creation failed, using existing user" \
-    && mkdir -p /home/officeuser \
-    && chown -R officeuser:officeuser /home/officeuser \
-    && chmod -R 777 /home/officeuser
-
+# Use the existing 'node' user (UID 1000) instead of creating a new one
 # Set working directory
 WORKDIR /app
 
@@ -38,13 +33,13 @@ COPY . .
 ENV PORT=5001
 ENV FRONTEND_URL=https://convertors-frontend.onrender.com
 ENV NODE_ENV=production
-ENV HOME=/home/officeuser
-ENV USER=officeuser
+ENV HOME=/home/node
+ENV USER=node
 ENV XDG_RUNTIME_DIR=/app/tmp/officeuser-runtime
 ENV CONVERSION_TIMEOUT=120000
 
 # Switch to non-root user
-USER officeuser
+USER node
 
 # Expose the application port
 EXPOSE $PORT

@@ -74,27 +74,31 @@ const uploadsDir = path.join('/app', 'Uploads');
 const convertedDir = path.join('/app', 'converted');
 const tempDir = path.join('/app', 'tmp');
 
-// Fix and verify directory permissions at startup
+// Verify directory permissions at startup
 (async () => {
   try {
-    // Ensure directories exist and have correct permissions
+    // Ensure directories exist and are accessible
     const dirs = [uploadsDir, convertedDir, tempDir, '/app/tmp/officeuser-runtime'];
     for (const dir of dirs) {
       await fsPromises.mkdir(dir, { recursive: true });
       try {
-        await execPromise(`chown -R 1001:1001 ${dir}`);
-        await execPromise(`chmod -R 777 ${dir}`);
-        console.log(`Fixed permissions for: ${dir}`);
+        // Attempt to set permissions, but don't fail if it errors
+        await execPromise(`chmod -R 775 ${dir}`);
+        console.log(`Set permissions for: ${dir}`);
       } catch (permErr) {
         console.warn(`Failed to set permissions for ${dir}: ${permErr.message}. Continuing with verification.`);
       }
-      // Verify permissions
-      await fsPromises.access(dir, fs.constants.R_OK | fs.constants.W_OK);
-      console.log(`Directory verified: ${dir}`);
+      // Verify read/write access
+      try {
+        await fsPromises.access(dir, fs.constants.R_OK | fs.constants.W_OK);
+        console.log(`Directory verified: ${dir}`);
+      } catch (accessErr) {
+        console.warn(`Directory access warning: ${dir} - ${accessErr.message}. Attempting to continue.`);
+      }
     }
   } catch (err) {
     console.error('Error setting up directories:', err.message);
-    process.exit(1);
+    // Log error but do not exit to allow the server to continue running
   }
 })();
 
