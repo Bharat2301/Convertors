@@ -4,6 +4,11 @@ FROM node:18-bullseye
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     libreoffice \
+    libreoffice-writer \
+    libreoffice-impress \
+    libreoffice-calc \
+    libreoffice-java-common \
+    default-jre \
     ghostscript \
     calibre \
     unoconv \
