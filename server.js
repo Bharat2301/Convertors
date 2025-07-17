@@ -1,6 +1,7 @@
 if (process.env.NODE_ENV !== 'production') {
   require('dotenv').config({ debug: true });
 }
+
 const express = require('express');
 const multer = require('multer');
 const ffmpeg = require('fluent-ffmpeg');
@@ -18,6 +19,7 @@ const tmp = require('tmp');
 const { fromPath } = require('pdf2pic');
 const PDFDocument = require('pdfkit');
 const libre = require('libreoffice-convert');
+const { Converter } = require('pdf2docx');
 
 // Log FFmpeg availability
 try {
@@ -77,7 +79,6 @@ const tempDir = path.join('/app', 'tmp');
   try {
     for (const dir of [uploadsDir, convertedDir, tempDir]) {
       await fsPromises.mkdir(dir, { recursive: true, mode: 0o777 });
-      // Verify directory is accessible
       await fsPromises.access(dir, fs.constants.R_OK | fs.constants.W_OK);
       console.log(`Directory created and verified: ${dir}`);
     }
@@ -204,6 +205,19 @@ app.get('/status', async (req, res) => {
           }
           console.log('Calibre version:', stdout.split('\n')[0]);
           resolve({ name: 'Calibre', status: 'OK', details: stdout.split('\n')[0] });
+        });
+      }),
+    },
+    {
+      name: 'Pandoc',
+      check: () => new Promise((resolve) => {
+        exec('pandoc --version', (err, stdout, stderr) => {
+          if (err) {
+            console.error('Pandoc check failed:', err.message, stderr);
+            return resolve({ name: 'Pandoc', status: 'Failed', details: err.message });
+          }
+          console.log('Pandoc version:', stdout.split('\n')[0]);
+          resolve({ name: 'Pandoc', status: 'OK', details: stdout.split('\n')[0] });
         });
       }),
     },
@@ -510,7 +524,15 @@ async function convertDocument(inputPath, outputPath, format) {
       return;
     } catch (err) {
       console.error(`PDF to DOCX conversion failed: ${err.message}`);
-      throw new Error(`PDF to DOCX conversion failed: ${err.message}`);
+      console.warn('Falling back to Pandoc for PDF to DOCX conversion');
+      try {
+        await tryPandocConversion(inputPath, outputPath, format);
+        console.log(`Pandoc conversion succeeded: ${outputPath}`);
+        return;
+      } catch (pandocError) {
+        console.error(`Pandoc fallback failed: ${pandocError.message}`);
+        throw new Error(`PDF to DOCX conversion failed: ${err.message}. Pandoc fallback also failed: ${pandocError.message}`);
+      }
     }
   }
 
@@ -541,50 +563,70 @@ async function convertDocument(inputPath, outputPath, format) {
   }
 }
 
-// Helper function for PDF to DOCX using pdf2docx
+// Updated PDF to DOCX conversion function
 async function convertPdfToDocx(inputPath, outputPath) {
   console.log(`Attempting pdf2docx conversion for ${inputPath} to ${outputPath}`);
   
-  const pythonScript = `
-from pdf2docx import Converter
-import sys
-import logging
-
-logging.basicConfig(level=logging.INFO)
-
-pdf_file = sys.argv[1]
-docx_file = sys.argv[2]
-
-try:
-    cv = Converter(pdf_file)
-    cv.convert(docx_file, start=0, end=None)
-    cv.close()
-    print(f"Conversion successful: {docx_file}")
-except Exception as e:
-    print(f"Error: {str(e)}", file=sys.stderr)
-    sys.exit(1)
-`;
-
-  const tempScriptPath = path.join(tempDir, `pdf2docx_${Date.now()}.py`);
-  await fsPromises.writeFile(tempScriptPath, pythonScript);
+  // Check if pdf2docx is available
+  try {
+    const { stdout, stderr } = await execPromise('python3 -c "import pdf2docx; print(pdf2docx.__version__)"', {
+      env: { ...process.env, HOME: '/home/officeuser', USER: 'officeuser', XDG_RUNTIME_DIR: '/app/tmp/officeuser-runtime' }
+    });
+    console.log(`pdf2docx version: ${stdout.trim()}`);
+  } catch (err) {
+    console.error('pdf2docx module not available:', err.message);
+    throw new Error('pdf2docx is not installed or inaccessible. Check server logs and ensure Python dependencies are installed.');
+  }
 
   try {
-    const { stdout, stderr } = await execPromise(`python3 ${tempScriptPath} "${inputPath}" "${outputPath}"`, {
-      env: {
-        ...process.env,
-        HOME: '/home/officeuser',
-        USER: 'officeuser',
-        XDG_RUNTIME_DIR: '/app/tmp/officeuser-runtime',
-      },
-      timeout: 180000,
+    // Validate PDF before conversion
+    const { stdout: gsStdout, stderr: gsStderr } = await execPromise(`gs -q -dNOPAUSE -dBATCH -sDEVICE=nullpage "${inputPath}"`, {
+      env: { ...process.env, HOME: '/home/officeuser', USER: 'officeuser' }
     });
-    if (stderr) console.warn(`pdf2docx stderr: ${stderr}`);
-    console.log(`pdf2docx stdout: ${stdout}`);
+    if (gsStderr) {
+      console.warn(`Ghostscript validation warning: ${gsStderr}`);
+      if (gsStderr.includes('encrypted')) {
+        throw new Error('PDF is encrypted and cannot be converted.');
+      }
+    }
+    console.log(`Ghostscript validation passed: ${gsStdout || 'No output'}`);
+  } catch (err) {
+    console.error(`PDF validation failed: ${err.message}`);
+    throw new Error(`Invalid or corrupted PDF: ${err.message}`);
+  }
+
+  try {
+    const cv = new Converter(inputPath);
+    await new Promise((resolve, reject) => {
+      cv.convert(outputPath, (err) => {
+        if (err) {
+          console.error(`pdf2docx conversion error: ${err.message}`);
+          reject(new Error(`pdf2docx conversion failed: ${err.message}`));
+        } else {
+          console.log(`pdf2docx conversion succeeded: ${outputPath}`);
+          resolve();
+        }
+      });
+      cv.close();
+    });
   } catch (err) {
     console.error(`pdf2docx conversion failed: ${err.message}`);
     throw err;
-  } finally {
-    await fsPromises.unlink(tempScriptPath).catch(err => console.error(`Error cleaning up temp script: ${err.message}`));
+  }
+}
+
+// Helper function for Pandoc conversion (fallback for PDF to DOCX)
+async function tryPandocConversion(inputPath, outputPath, format) {
+  console.log(`Attempting Pandoc conversion for ${inputPath} to ${outputPath} (${format})`);
+  try {
+    await execPromise(`pandoc "${inputPath}" -o "${outputPath}"`, {
+      env: { ...process.env, HOME: '/home/officeuser', USER: 'officeuser', XDG_RUNTIME_DIR: '/app/tmp/officeuser-runtime' },
+      timeout: 180000,
+    });
+    console.log(`Pandoc conversion succeeded: ${outputPath}`);
+  } catch (err) {
+    console.error(`Pandoc conversion failed: ${err.message}, stderr: ${err.stderr || 'none'}`);
+    throw err;
   }
 }
 
@@ -596,12 +638,7 @@ async function tryUnoconvConversion(inputPath, outputPath, format) {
   try {
     const { stdout, stderr } = await execPromise(command, { 
       timeout: 180000,
-      env: {
-        ...process.env,
-        HOME: '/home/officeuser',
-        USER: 'officeuser',
-        XDG_RUNTIME_DIR: '/app/tmp/officeuser-runtime',
-      }
+      env: { ...process.env, HOME: '/home/officeuser', USER: 'officeuser', XDG_RUNTIME_DIR: '/app/tmp/officeuser-runtime' }
     });
     if (stderr) console.warn(`unoconv stderr: ${stderr}`);
     console.log(`unoconv conversion succeeded: ${outputPath}`);
@@ -794,7 +831,7 @@ async function cleanupFiles(filePaths) {
   await Promise.all(cleanupPromises);
 }
 
-// Start LibreOffice in headless mode with retry mechanism (for non-PDF-to-DOCX conversions)
+// Start LibreOffice in headless mode with retry mechanism
 async function startLibreOffice() {
   const maxRetries = 3;
   let attempts = 0;
