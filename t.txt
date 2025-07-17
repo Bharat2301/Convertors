@@ -1,7 +1,40 @@
+i have backend folder in that i have converted folder then i have uploads folder then i have .dockerignore file 
+node_modules
+npm-debug.log
+Uploads
+converted
+then i have .env file 
 PORT=5001
 FRONTEND_URL=http://localhost:5173
-CONVERSION_TIMEOUT=120000 this is my .env file 
-require('dotenv').config();
+CONVERSION_TIMEOUT=120000
+then i have Dockerfile file 
+FROM node:18-bullseye
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    libreoffice \
+    imagemagick \
+    calibre \
+    unoconv \
+    p7zip-full \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+COPY . .
+
+# Set environment variables
+ENV PORT=5001
+ENV LIBREOFFICE_PATH=/usr/bin/unoconv
+ENV FRONTEND_URL=https://convertors-frontend.onrender.com
+ENV NODE_ENV=production
+
+EXPOSE $PORT
+CMD ["node", "server.js"]
+then i have server.js file 
+require('dotenv').config({ debug: true }); // Enable dotenv debug logging
 const express = require('express');
 const multer = require('multer');
 const ffmpeg = require('fluent-ffmpeg');
@@ -10,7 +43,6 @@ const fs = require('fs');
 const fsPromises = fs.promises;
 const path = require('path');
 const cors = require('cors');
-const libre = require('libreoffice-convert');
 const imagemagick = require('imagemagick');
 const { optimize } = require('svgo');
 const sevenZip = require('node-7z');
@@ -38,13 +70,34 @@ console.log('Environment variables:', {
   PORT: process.env.PORT,
   FRONTEND_URL: process.env.FRONTEND_URL,
   CONVERSION_TIMEOUT: process.env.CONVERSION_TIMEOUT,
+  LIBREOFFICE_PATH: process.env.LIBREOFFICE_PATH,
 });
 
+// Enhanced CORS configuration
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
-  methods: ['GET', 'POST', 'DELETE'],
-  allowedHeaders: ['Content-Type'],
+  origin: (origin, callback) => {
+    const allowedOrigins = [
+      'http://localhost:5173',
+      process.env.FRONTEND_URL || 'https://convertors-frontend.onrender.com'
+    ].filter(Boolean);
+    
+    console.log(`CORS: Request from origin ${origin || 'undefined'}`);
+    if (!origin || allowedOrigins.includes(origin)) {
+      console.log(`CORS: Allowing origin ${origin || 'undefined'}`);
+      callback(null, true);
+    } else {
+      console.warn(`CORS: Blocking origin ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
+  optionsSuccessStatus: 204,
 }));
+
+// Handle OPTIONS preflight requests
+app.options('*', cors());
 
 const allFormats = [
   'bmp', 'eps', 'gif', 'ico', 'png', 'svg', 'tga', 'tiff', 'wbmp', 'webp', 'jpg', 'jpeg',
@@ -66,8 +119,9 @@ const supportedFormats = {
   ebook: allFormats,
 };
 
-const uploadsDir = path.join(__dirname, 'Uploads');
-const convertedDir = path.join(__dirname, 'converted');
+// Use /app for Render's filesystem
+const uploadsDir = path.join('/app', 'Uploads');
+const convertedDir = path.join('/app', 'converted');
 
 // Ensure directories exist
 (async () => {
@@ -96,13 +150,95 @@ const upload = multer({
   },
 });
 
+// Debug middleware to log all registered routes
+app.use((req, res, next) => {
+  console.log(`Route requested: ${req.method} ${req.path}`);
+  next();
+});
+
+// Register routes with logging
+const routes = [
+  { method: 'get', path: '/health' },
+  { method: 'get', path: '/status' },
+  { method: 'post', path: '/api/convert' },
+  { method: 'get', path: '/converted/:filename' },
+  { method: 'delete', path: '/api/delete/:filename' },
+];
+
+routes.forEach(({ method, path }) => {
+  console.log(`Registering route: ${method.toUpperCase()} ${path}`);
+});
+
 app.get('/health', (req, res) => {
-  console.log('Health check requested');
+  console.log('Health check requested from:', req.get('origin'));
   res.status(200).json({ status: 'OK' });
 });
 
+app.get('/status', (req, res) => {
+  console.log('Status check requested from:', req.get('origin'));
+  const checks = [
+    {
+      name: 'FFmpeg',
+      check: () => new Promise((resolve) => {
+        exec('ffmpeg -version', (err, stdout, stderr) => {
+          if (err) {
+            console.error('FFmpeg check failed:', err.message, stderr);
+            return resolve({ name: 'FFmpeg', status: 'Failed', details: err.message });
+          }
+          console.log('FFmpeg version:', stdout.split('\n')[0]);
+          resolve({ name: 'FFmpeg', status: 'OK', details: stdout.split('\n')[0] });
+        });
+      }),
+    },
+    {
+      name: 'unoconv',
+      check: () => new Promise((resolve) => {
+        const librePath = process.env.LIBREOFFICE_PATH || '/usr/bin/unoconv';
+        exec(`${librePath} --version`, (err, stdout, stderr) => {
+          if (err) {
+            console.error('unoconv check failed:', err.message, stderr);
+            return resolve({ name: 'unoconv', status: 'Failed', details: err.message });
+          }
+          console.log('unoconv version:', stdout.split('\n')[0]);
+          resolve({ name: 'unoconv', status: 'OK', details: stdout.split('\n')[0] });
+        });
+      }),
+    },
+    {
+      name: 'ImageMagick',
+      check: () => new Promise((resolve) => {
+        exec('convert -version', (err, stdout, stderr) => {
+          if (err) {
+            console.error('ImageMagick check failed:', err.message, stderr);
+            return resolve({ name: 'ImageMagick', status: 'Failed', details: err.message });
+          }
+          console.log('ImageMagick version:', stdout.split('\n')[0]);
+          resolve({ name: 'ImageMagick', status: 'OK', details: stdout.split('\n')[0] });
+        });
+      }),
+    },
+    {
+      name: 'Calibre',
+      check: () => new Promise((resolve) => {
+        exec('ebook-convert --version', (err, stdout, stderr) => {
+          if (err) {
+            console.error('Calibre check failed:', err.message, stderr);
+            return resolve({ name: 'Calibre', status: 'Failed', details: err.message });
+          }
+          console.log('Calibre version:', stdout.split('\n')[0]);
+          resolve({ name: 'Calibre', status: 'OK', details: stdout.split('\n')[0] });
+        });
+      }),
+    },
+  ];
+
+  Promise.all(checks.map(c => c.check())).then(results => {
+    res.status(200).json({ status: 'OK', dependencies: results });
+  });
+});
+
 app.post('/api/convert', upload.array('files', 5), async (req, res) => {
-  console.log('Received /api/convert request', {
+  console.log('Received /api/convert request from:', req.get('origin'), {
     files: req.files ? req.files.map(f => ({ name: f.originalname, size: f.size, path: f.path })) : [],
     formats: req.body.formats,
   });
@@ -167,7 +303,7 @@ app.post('/api/convert', upload.array('files', 5), async (req, res) => {
           break;
         case 'document':
           if (!process.env.LIBREOFFICE_PATH) {
-            throw new Error('LibreOffice path not set. Document conversion requires LIBREOFFICE_PATH in .env or system installation.');
+            throw new Error('unoconv path not set. Document conversion requires LIBREOFFICE_PATH in .env or system installation.');
           }
           await convertDocument(inputPath, outputPath, outputExt);
           break;
@@ -211,7 +347,7 @@ app.post('/api/convert', upload.array('files', 5), async (req, res) => {
 app.get('/converted/:filename', async (req, res) => {
   const filename = req.params.filename;
   const filePath = path.join(convertedDir, filename);
-  console.log(`Serving file: ${filePath}`);
+  console.log(`Serving file: ${filePath} to ${req.get('origin')}`);
   try {
     await fsPromises.access(filePath);
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -232,6 +368,7 @@ app.get('/converted/:filename', async (req, res) => {
 app.delete('/api/delete/:filename', async (req, res) => {
   const filename = req.params.filename;
   const filePath = path.join(convertedDir, filename);
+  console.log(`Delete request for ${filePath} from ${req.get('origin')}`);
   try {
     await cleanupFiles([filePath]);
     res.status(200).json({ message: `File ${filename} deleted successfully.` });
@@ -247,7 +384,7 @@ async function convertImage(inputPath, outputPath, format, subSection) {
   const sharpSupported = ['bmp', 'gif', 'png', 'tiff', 'webp', 'jpg', 'jpeg'];
   if (!imageFormats.includes(inputExt) && ['pdf', 'docx', 'txt', 'rtf', 'odt'].includes(inputExt)) {
     if (!process.env.LIBREOFFICE_PATH) {
-      throw new Error('LibreOffice path not set. Document-to-image conversion requires LIBREOFFICE_PATH in .env or system installation.');
+      throw new Error('unoconv path not set. Document-to-image conversion requires LIBREOFFICE_PATH in .env or system installation.');
     }
     const tempPdfPath = path.join(convertedDir, `temp_${Date.now()}.pdf`);
     try {
@@ -317,7 +454,7 @@ async function convertPdf(inputPath, outputPath, format) {
   const inputExt = path.extname(inputPath).toLowerCase().slice(1);
   if (inputExt !== 'pdf') {
     if (!process.env.LIBREOFFICE_PATH) {
-      throw new Error('LibreOffice path not set. Document-to-PDF conversion requires LIBREOFFICE_PATH in .env or system installation.');
+      throw new Error('unoconv path not set. Document-to-PDF conversion requires LIBREOFFICE_PATH in .env or system installation.');
     }
     const tempPdfPath = path.join(convertedDir, `temp_${Date.now()}.pdf`);
     try {
@@ -341,33 +478,8 @@ async function convertPdf(inputPath, outputPath, format) {
         resolve();
       });
     });
-  } else if (format === 'docx') {
-    if (!process.env.LIBREOFFICE_PATH) {
-      throw new Error('LibreOffice path not set. PDF-to-DOCX conversion requires LIBREOFFICE_PATH in .env or system installation.');
-    }
-    const pdfBuffer = await fsPromises.readFile(inputPath);
-    await new Promise((resolve, reject) => {
-      libre.soffice = process.env.LIBREOFFICE_PATH || '/usr/bin/soffice';
-      tmp.dir({ unsafeCleanup: true }, (err, tempDir, cleanupCallback) => {
-        if (err) return reject(new Error(`Failed to create temporary directory: ${err.message}`));
-        libre.convert(pdfBuffer, '.docx', { tmpDir: tempDir }, (err, docxBuffer) => {
-          if (err) {
-            cleanupCallback();
-            return reject(new Error(`PDF to DOCX conversion failed: ${err.message}`));
-          }
-          fsPromises.writeFile(outputPath, docxBuffer)
-            .then(() => {
-              cleanupCallback();
-              console.log(`PDF to DOCX conversion completed: ${outputPath}`);
-              resolve();
-            })
-            .catch((writeErr) => {
-              cleanupCallback();
-              reject(writeErr);
-            });
-        });
-      });
-    });
+  } else if (['docx', 'txt', 'rtf', 'odt'].includes(format)) {
+    await convertDocument(inputPath, outputPath, format);
   } else {
     throw new Error(`Unsupported PDF output format: ${format}`);
   }
@@ -375,7 +487,7 @@ async function convertPdf(inputPath, outputPath, format) {
 
 async function convertDocument(inputPath, outputPath, format) {
   if (!process.env.LIBREOFFICE_PATH) {
-    throw new Error('LibreOffice path not set. Document conversion requires LIBREOFFICE_PATH in .env or system installation.');
+    throw new Error('unoconv path not set. Document conversion requires LIBREOFFICE_PATH in .env or system installation.');
   }
   const inputExt = path.extname(inputPath).toLowerCase().slice(1);
   const supportedDocumentFormats = ['docx', 'pdf', 'txt', 'rtf', 'odt'];
@@ -394,28 +506,15 @@ async function convertDocument(inputPath, outputPath, format) {
   if (!supportedDocumentFormats.includes(format)) {
     throw new Error(`Unsupported output document format: ${format}`);
   }
-  const inputBuffer = await fsPromises.readFile(inputPath);
-  await new Promise((resolve, reject) => {
-    libre.soffice = process.env.LIBREOFFICE_PATH || '/usr/bin/soffice';
-    tmp.dir({ unsafeCleanup: true }, (err, tempDir, cleanupCallback) => {
-      if (err) return reject(new Error(`Failed to create temporary directory: ${err.message}`));
-      libre.convert(inputBuffer, `.${format}`, { tmpDir: tempDir }, (err, buffer) => {
-        if (err) {
-          cleanupCallback();
-          console.error(`Document conversion failed: ${err.message}`);
-          return reject(new Error(`Document conversion failed: ${err.message}`));
-        }
-        fsPromises.writeFile(outputPath, buffer)
-          .then(() => {
-            cleanupCallback();
-            console.log(`Document conversion completed: ${outputPath}`);
-            resolve();
-          })
-          .catch((writeErr) => {
-            cleanupCallback();
-            reject(writeErr);
-          });
-      });
+  return new Promise((resolve, reject) => {
+    const librePath = process.env.LIBREOFFICE_PATH || '/usr/bin/unoconv';
+    exec(`${librePath} -f ${format} -o "${outputPath}" "${inputPath}"`, (err, stdout, stderr) => {
+      if (err) {
+        console.error(`Document conversion failed: ${err.message}`, { stdout, stderr });
+        return reject(new Error(`Document conversion failed: ${err.message}`));
+      }
+      console.log(`Document conversion completed: ${outputPath}`);
+      resolve();
     });
   });
 }
@@ -437,7 +536,7 @@ async function convertMedia(inputPath, outputPath, format, inputExt) {
         .inputFormat('lavfi')
         .videoCodec('mpeg4')
         .audioCodec('aac')
-        .outputOptions('-shortest');
+        .outputOptions('-shortest', '-threads 1', '-preset ultrafast');
     } else {
       if (format === 'aac') {
         ffmpegInstance.audioCodec('aac');
@@ -457,14 +556,16 @@ async function convertMedia(inputPath, outputPath, format, inputExt) {
     }
 
     ffmpegInstance
+      .outputOptions('-threads 1', '-preset ultrafast')
       .toFormat(format)
       .on('start', (cmd) => console.log(`FFmpeg command: ${cmd}`))
+      .on('progress', (progress) => console.log(`Processing: ${progress.percent}% done`))
       .on('end', () => {
         console.log(`Media conversion completed: ${outputPath}`);
         resolve();
       })
-      .on('error', (err) => {
-        console.error(`Media conversion error for ${format}: ${err.message}`);
+      .on('error', (err, stdout, stderr) => {
+        console.error(`Media conversion error for ${format}: ${err.message}`, { stdout, stderr });
         reject(new Error(`Media conversion failed: ${err.message}`));
       })
       .save(outputPath);
@@ -491,9 +592,9 @@ async function convertArchive(inputPath, outputPath, format) {
 
 async function convertEbook(inputPath, outputPath, format) {
   return new Promise((resolve, reject) => {
-    exec(`ebook-convert "${inputPath}" "${outputPath}"`, (err) => {
+    exec(`ebook-convert "${inputPath}" "${outputPath}"`, (err, stdout, stderr) => {
       if (err) {
-        console.error(`Ebook conversion error: ${err.message}`);
+        console.error(`Ebook conversion error: ${err.message}`, { stdout, stderr });
         return reject(new Error(`Ebook conversion failed: ${err.message}`));
       }
       console.log(`Ebook conversion completed: ${outputPath}`);
@@ -514,6 +615,10 @@ async function cleanupFiles(filePaths) {
         console.log(`Deleted file: ${filePath}`);
         return;
       } catch (err) {
+        if (err.code === 'ENOENT') {
+          console.log(`File not found for deletion: ${filePath}`);
+          return;
+        }
         if (err.code === 'EPERM') {
           attempts++;
           console.warn(`EPERM error on attempt ${attempts} for ${filePath}. Retrying in ${retryDelay}ms...`);
@@ -531,20 +636,7 @@ async function cleanupFiles(filePaths) {
   await Promise.all(cleanupPromises);
 }
 
-app.listen(port, () => {
-  console.log(`Server running on http://localhost:${port}`);
+app.listen(port, '0.0.0.0', () => {
+  console.log(`Server running on http://0.0.0.0:${port}`);
 });
-this is my server.js file 
-i want to upload code on render 
-so server start  because in local error nvironment variables: {
-  PORT: '5001',
-  FRONTEND_URL: 'http://localhost:5173',
-  CONVERSION_TIMEOUT: '120000'
-}
-Server running on http://localhost:5001
-Directories created: {
-  uploadsDir: 'C:\\Users\\bhara\\OneDrive\\Desktop\\New\\backend\\Uploads',
-  convertedDir: 'C:\\Users\\bhara\\OneDrive\\Desktop\\New\\backend\\converted'
-}
-FFmpeg not found or misconfigured: Cannot find ffmpeg
- on server start 
+this is my backend code 
