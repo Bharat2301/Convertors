@@ -17,7 +17,7 @@ const execPromise = util.promisify(exec);
 const tmp = require('tmp');
 const { fromPath } = require('pdf2pic');
 const PDFDocument = require('pdfkit');
-const libre = require('libreoffice-convert'); // New dependency
+const libre = require('libreoffice-convert');
 
 // Log FFmpeg availability
 try {
@@ -70,13 +70,16 @@ app.options('*', cors());
 // Use /app for Render's filesystem
 const uploadsDir = path.join('/app', 'Uploads');
 const convertedDir = path.join('/app', 'converted');
+const tempDir = path.join('/app', 'tmp');
 
 // Ensure directories exist with correct permissions
 (async () => {
   try {
-    await fsPromises.mkdir(uploadsDir, { recursive: true, mode: 0o777 }); // Changed to 777 for LibreOffice
-    await fsPromises.mkdir(convertedDir, { recursive: true, mode: 0o777 });
-    console.log('Directories created:', { uploadsDir, convertedDir });
+    for (const dir of [uploadsDir, convertedDir, tempDir]) {
+      await fsPromises.mkdir(dir, { recursive: true, mode: 0o777 });
+      await fsPromises.chown(dir, 1000, 1000); // Ensure officeuser ownership
+      console.log(`Directory created and permissions set: ${dir}`);
+    }
   } catch (err) {
     console.error('Error creating directories:', err.message);
     process.exit(1);
@@ -382,7 +385,7 @@ async function convertImage(inputPath, outputPath, format, subSection) {
   const inputExt = path.extname(inputPath).toLowerCase().slice(1);
   const sharpSupported = ['bmp', 'gif', 'png', 'tiff', 'webp', 'jpg', 'jpeg'];
   if (!imageFormats.includes(inputExt) && ['pdf', 'docx', 'txt', 'rtf', 'odt'].includes(inputExt)) {
-    const tempPdfPath = path.join(convertedDir, `temp_${Date.now()}.pdf`);
+    const tempPdfPath = path.join(tempDir, `temp_${Date.now()}.pdf`);
     try {
       await convertDocument(inputPath, tempPdfPath, 'pdf');
       await convertImage(tempPdfPath, outputPath, format, subSection);
@@ -445,7 +448,7 @@ async function convertImage(inputPath, outputPath, format, subSection) {
 async function convertPdf(inputPath, outputPath, format) {
   const inputExt = path.extname(inputPath).toLowerCase().slice(1);
   if (inputExt !== 'pdf') {
-    const tempPdfPath = path.join(convertedDir, `temp_${Date.now()}.pdf`);
+    const tempPdfPath = path.join(tempDir, `temp_${Date.now()}.pdf`);
     try {
       await convertDocument(inputPath, tempPdfPath, 'pdf');
       await convertPdf(tempPdfPath, outputPath, format);
@@ -480,63 +483,162 @@ async function convertPdf(inputPath, outputPath, format) {
 async function convertDocument(inputPath, outputPath, format) {
   const inputExt = path.extname(inputPath).toLowerCase().slice(1);
   const supportedDocumentFormats = ['docx', 'pdf', 'txt', 'rtf', 'odt'];
+  
+  // Pre-processing for non-document files
   if (['bmp', 'eps', 'gif', 'ico', 'png', 'svg', 'tga', 'tiff', 'wbmp', 'webp', 'jpg', 'jpeg'].includes(inputExt)) {
-    const tempPdfPath = path.join(convertedDir, `temp_${Date.now()}.pdf`);
+    const tempPdfPath = path.join(tempDir, `temp_${Date.now()}.pdf`);
     try {
       await convertImage(inputPath, tempPdfPath, 'pdf', 'image');
       await convertDocument(tempPdfPath, outputPath, format);
       await fsPromises.unlink(tempPdfPath).catch(err => console.error(`Error cleaning up temp PDF: ${err.message}`));
+      return;
     } catch (err) {
       console.error(`Document conversion preprocessing failed: ${err.message}`);
       throw err;
     }
-    return;
   }
+
   if (!supportedDocumentFormats.includes(format)) {
     throw new Error(`Unsupported output document format: ${format}`);
   }
 
-  // Try unoconv first
-  if (process.env.LIBREOFFICE_PATH) {
-    const librePath = process.env.LIBREOFFICE_PATH || '/usr/bin/unoconv';
-    const command = `${librePath} -f ${format} -o "${outputPath}" "${inputPath}"`;
-    console.log(`Executing unoconv command: ${command}`);
-    try {
-      const { stdout, stderr } = await execPromise(command, { timeout: 180000 }); // 3-minute timeout
-      console.log(`Document conversion completed with unoconv: ${outputPath}`, { stdout });
-      if (stderr) console.warn(`unoconv warnings: ${stderr}`);
-      return; // Success, exit function
-    } catch (err) {
-      console.error(`unoconv failed for ${inputPath} to ${format}: ${err.message}`, { stderr: err.stderr });
-      console.warn(`Falling back to libreoffice-convert due to unoconv error: ${err.message}`);
-    }
-  } else {
-    console.warn('unoconv path not set, falling back to libreoffice-convert');
+  // Try multiple conversion methods with fallbacks
+  try {
+    // Method 1: unoconv (primary)
+    await tryUnoconvConversion(inputPath, outputPath, format);
+    return;
+  } catch (unoconvError) {
+    console.warn(`unoconv failed, trying alternative methods: ${unoconvError.message}`);
   }
 
-  // Fallback to libreoffice-convert
   try {
-    const inputBuf = await fsPromises.readFile(inputPath);
-    await new Promise((resolve, reject) => {
-      libre.convert(inputBuf, format, undefined, (err, outputBuf) => {
-        if (err) {
-          console.error(`libreoffice-convert failed for ${inputPath} to ${format}: ${err.message}`);
-          return reject(new Error(`Document conversion failed: ${err.message}`));
-        }
-        fsPromises.writeFile(outputPath, outputBuf)
-          .then(() => {
-            console.log(`Document conversion completed with libreoffice-convert: ${outputPath}`);
-            resolve();
-          })
-          .catch(err => {
-            console.error(`Error writing output file ${outputPath}: ${err.message}`);
-            reject(new Error(`Failed to write output file: ${err.message}`));
-          });
-      });
+    // Method 2: libreoffice-convert with explicit temp file handling
+    await tryLibreOfficeConvert(inputPath, outputPath, format);
+    return;
+  } catch (libreError) {
+    console.warn(`libreoffice-convert failed: ${libreError.message}`);
+  }
+
+  try {
+    // Method 3: pdftodoc (fallback)
+    if (format === 'docx') {
+      await tryPdfToDoc(inputPath, outputPath);
+      return;
+    }
+  } catch (pdftodocError) {
+    console.warn(`pdftodoc failed: ${pdftodocError.message}`);
+  }
+
+  try {
+    // Method 4: Ghostscript + Pandoc if available
+    await tryGhostscriptPandoc(inputPath, outputPath, format);
+    return;
+  } catch (finalError) {
+    console.error(`All conversion methods failed: ${finalError.message}`);
+    throw new Error(`Document conversion failed after all attempts. The file may be encrypted or corrupted.`);
+  }
+}
+
+// Helper functions for different conversion methods
+async function tryUnoconvConversion(inputPath, outputPath, format) {
+  const command = `/usr/bin/unoconv -f ${format} -o "${outputPath}" "${inputPath}"`;
+  console.log(`Attempting unoconv conversion: ${command}`);
+  
+  try {
+    const { stdout, stderr } = await execPromise(command, { 
+      timeout: 180000,
+      env: {
+        ...process.env,
+        HOME: '/home/officeuser',
+        USER: 'officeuser',
+        XDG_RUNTIME_DIR: '/tmp/officeuser-runtime',
+      }
     });
+    if (stderr) console.warn(`unoconv stderr: ${stderr}`);
+    console.log(`unoconv conversion succeeded: ${outputPath}`);
   } catch (err) {
-    console.error(`Document conversion failed for ${inputPath} to ${format}: ${err.message}`);
-    throw new Error(`Document conversion failed: ${err.message}. The PDF may be encrypted or corrupted. Try a different PDF.`);
+    console.error(`unoconv failed for ${inputPath} to ${format}: ${err.message}`);
+    throw err;
+  }
+}
+
+async function tryLibreOfficeConvert(inputPath, outputPath, format) {
+  console.log(`Attempting libreoffice-convert for ${format}`);
+  
+  const inputBuf = await fsPromises.readFile(inputPath);
+  const tempInputPath = path.join(tempDir, `libreoffice_input_${Date.now()}.${path.extname(inputPath).slice(1)}`);
+  await fsPromises.writeFile(tempInputPath, inputBuf);
+  await fsPromises.chmod(tempInputPath, 0o666);
+
+  await new Promise((resolve, reject) => {
+    libre.convert(inputBuf, format, undefined, (err, outputBuf) => {
+      if (err) {
+        console.error(`libreoffice-convert error: ${err.message}`);
+        return reject(err);
+      }
+      fsPromises.writeFile(outputPath, outputBuf)
+        .then(() => {
+          console.log(`libreoffice-convert succeeded: ${outputPath}`);
+          resolve();
+        })
+        .catch(reject)
+        .finally(() => {
+          fsPromises.unlink(tempInputPath).catch(err => console.error(`Error cleaning up temp input: ${err.message}`));
+        });
+    });
+  });
+}
+
+async function tryPdfToDoc(inputPath, outputPath) {
+  console.log(`Attempting pdftodoc conversion`);
+  
+  const tempDirPath = await fsPromises.mkdtemp(path.join(tempDir, 'pdftodoc-'));
+  const tempHtmlPath = path.join(tempDirPath, 'output.html');
+  
+  try {
+    // First convert PDF to HTML
+    await execPromise(`pdftohtml -c -noframes "${inputPath}" "${tempHtmlPath}"`, {
+      env: { ...process.env, HOME: '/home/officeuser', USER: 'officeuser' }
+    });
+    
+    // Then convert HTML to DOCX using pandoc if available
+    try {
+      await execPromise(`pandoc -s "${tempHtmlPath}" -o "${outputPath}"`, {
+        env: { ...process.env, HOME: '/home/officeuser', USER: 'officeuser' }
+      });
+    } catch {
+      // Fallback to simple copy if pandoc not available
+      await fsPromises.copyFile(tempHtmlPath, outputPath);
+    }
+    
+    console.log(`pdftodoc conversion succeeded: ${outputPath}`);
+  } finally {
+    // Cleanup
+    await fsPromises.rm(tempDirPath, { recursive: true }).catch(err => console.error(`Error cleaning up temp dir: ${err.message}`));
+  }
+}
+
+async function tryGhostscriptPandoc(inputPath, outputPath, format) {
+  console.log(`Attempting Ghostscript+Pandoc conversion`);
+  
+  const tempDirPath = await fsPromises.mkdtemp(path.join(tempDir, 'gs-'));
+  const tempPdfPath = path.join(tempDirPath, 'processed.pdf');
+  
+  try {
+    // Use Ghostscript to process the PDF
+    await execPromise(`gs -q -dNOPAUSE -dBATCH -sDEVICE=pdfwrite -sOutputFile="${tempPdfPath}" "${inputPath}"`, {
+      env: { ...process.env, HOME: '/home/officeuser', USER: 'officeuser' }
+    });
+    
+    // Then convert to target format using Pandoc
+    await execPromise(`pandoc "${tempPdfPath}" -o "${outputPath}"`, {
+      env: { ...process.env, HOME: '/home/officeuser', USER: 'officeuser' }
+    });
+    
+    console.log(`Ghostscript+Pandoc conversion succeeded: ${outputPath}`);
+  } finally {
+    // Cleanup
+    await fsPromises.rm(tempDirPath, { recursive: true }).catch(err => console.error(`Error cleaning up temp dir: ${err.message}`));
   }
 }
 
@@ -672,6 +774,45 @@ async function cleanupFiles(filePaths) {
   await Promise.all(cleanupPromises);
 }
 
-app.listen(port, '0.0.0.0', () => {
-  console.log(`Server running on http://0.0.0.0:${port}`);
+// Start LibreOffice in headless mode with retry mechanism
+async function startLibreOffice() {
+  const maxRetries = 3;
+  let attempts = 0;
+  while (attempts < maxRetries) {
+    try {
+      console.log(`Starting LibreOffice headless (attempt ${attempts + 1})...`);
+      await execPromise(
+        'libreoffice --headless --accept="socket,host=127.0.0.1,port=2002;urp;" --norestore --nologo --nodefault',
+        {
+          env: {
+            ...process.env,
+            HOME: '/home/officeuser',
+            USER: 'officeuser',
+            XDG_RUNTIME_DIR: '/tmp/officeuser-runtime',
+          },
+          timeout: 30000,
+        }
+      );
+      console.log('LibreOffice started successfully');
+      return;
+    } catch (err) {
+      attempts++;
+      console.warn(`LibreOffice start attempt ${attempts} failed: ${err.message}`);
+      if (attempts === maxRetries) {
+        console.error('Failed to start LibreOffice after maximum retries');
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 5000));
+    }
+  }
+}
+
+// Start LibreOffice before the server
+startLibreOffice().then(() => {
+  app.listen(port, '0.0.0.0', () => {
+    console.log(`Server running on http://0.0.0.0:${port}`);
+  });
+}).catch(err => {
+  console.error('Failed to start server due to LibreOffice error:', err);
+  process.exit(1);
 });
