@@ -19,7 +19,6 @@ const tmp = require('tmp');
 const { fromPath } = require('pdf2pic');
 const PDFDocument = require('pdfkit');
 const libre = require('libreoffice-convert');
-const { Converter } = require('pdf2docx');
 
 // Log FFmpeg availability
 try {
@@ -153,19 +152,6 @@ app.get('/status', async (req, res) => {
           }
           console.log('FFmpeg version:', stdout.split('\n')[0]);
           resolve({ name: 'FFmpeg', status: 'OK', details: stdout.split('\n')[0] });
-        });
-      }),
-    },
-    {
-      name: 'Python (pdf2docx)',
-      check: () => new Promise((resolve) => {
-        exec('python3 -c "import pdf2docx; print(pdf2docx.__version__)"', (err, stdout, stderr) => {
-          if (err) {
-            console.error('pdf2docx check failed:', err.message, stderr);
-            return resolve({ name: 'pdf2docx', status: 'Failed', details: err.message });
-          }
-          console.log('pdf2docx version:', stdout.split('\n')[0]);
-          resolve({ name: 'pdf2docx', status: 'OK', details: stdout.split('\n')[0] });
         });
       }),
     },
@@ -354,7 +340,7 @@ app.post('/api/convert', upload.array('files', 5), async (req, res) => {
     });
   } catch (error) {
     console.error('Conversion error:', { message: error.message, stack: error.stack });
-    res.status(500).json({ error: error.message || 'Conversion failed. Please try a different PDF or check server logs.' });
+    res.status(500).json({ error: error.message || 'Conversion failed. Please try a different file or check server logs.' });
   } finally {
     await cleanupFiles(tempFiles.filter(file => file.startsWith(uploadsDir)));
   }
@@ -516,46 +502,28 @@ async function convertDocument(inputPath, outputPath, format) {
     throw new Error(`Unsupported output document format: ${format}`);
   }
 
-  // Handle PDF to DOCX using pdf2docx
-  if (inputExt === 'pdf' && format === 'docx') {
-    try {
-      await convertPdfToDocx(inputPath, outputPath);
-      console.log(`PDF to DOCX conversion succeeded: ${outputPath}`);
-      return;
-    } catch (err) {
-      console.error(`PDF to DOCX conversion failed: ${err.message}`);
-      console.warn('Falling back to Pandoc for PDF to DOCX conversion');
-      try {
-        await tryPandocConversion(inputPath, outputPath, format);
-        console.log(`Pandoc conversion succeeded: ${outputPath}`);
-        return;
-      } catch (pandocError) {
-        console.error(`Pandoc fallback failed: ${pandocError.message}`);
-        throw new Error(`PDF to DOCX conversion failed: ${err.message}. Pandoc fallback also failed: ${pandocError.message}`);
-      }
-    }
-  }
-
-  // Fallback to LibreOffice for other document conversions
+  // Try unoconv first
   try {
-    // Method 1: unoconv (primary)
     await tryUnoconvConversion(inputPath, outputPath, format);
+    console.log(`unoconv conversion succeeded: ${outputPath}`);
     return;
   } catch (unoconvError) {
     console.warn(`unoconv failed, trying alternative methods: ${unoconvError.message}`);
   }
 
+  // Fallback to libreoffice-convert
   try {
-    // Method 2: libreoffice-convert with explicit temp file handling
     await tryLibreOfficeConvert(inputPath, outputPath, format);
+    console.log(`libreoffice-convert succeeded: ${outputPath}`);
     return;
   } catch (libreError) {
     console.warn(`libreoffice-convert failed: ${libreError.message}`);
   }
 
+  // Final fallback to Ghostscript + Pandoc
   try {
-    // Method 3: Ghostscript + Pandoc if available
     await tryGhostscriptPandoc(inputPath, outputPath, format);
+    console.log(`Ghostscript+Pandoc conversion succeeded: ${outputPath}`);
     return;
   } catch (finalError) {
     console.error(`All conversion methods failed: ${finalError.message}`);
@@ -563,74 +531,6 @@ async function convertDocument(inputPath, outputPath, format) {
   }
 }
 
-// Updated PDF to DOCX conversion function
-async function convertPdfToDocx(inputPath, outputPath) {
-  console.log(`Attempting pdf2docx conversion for ${inputPath} to ${outputPath}`);
-  
-  // Check if pdf2docx is available
-  try {
-    const { stdout, stderr } = await execPromise('python3 -c "import pdf2docx; print(pdf2docx.__version__)"', {
-      env: { ...process.env, HOME: '/home/officeuser', USER: 'officeuser', XDG_RUNTIME_DIR: '/app/tmp/officeuser-runtime' }
-    });
-    console.log(`pdf2docx version: ${stdout.trim()}`);
-  } catch (err) {
-    console.error('pdf2docx module not available:', err.message);
-    throw new Error('pdf2docx is not installed or inaccessible. Check server logs and ensure Python dependencies are installed.');
-  }
-
-  try {
-    // Validate PDF before conversion
-    const { stdout: gsStdout, stderr: gsStderr } = await execPromise(`gs -q -dNOPAUSE -dBATCH -sDEVICE=nullpage "${inputPath}"`, {
-      env: { ...process.env, HOME: '/home/officeuser', USER: 'officeuser' }
-    });
-    if (gsStderr) {
-      console.warn(`Ghostscript validation warning: ${gsStderr}`);
-      if (gsStderr.includes('encrypted')) {
-        throw new Error('PDF is encrypted and cannot be converted.');
-      }
-    }
-    console.log(`Ghostscript validation passed: ${gsStdout || 'No output'}`);
-  } catch (err) {
-    console.error(`PDF validation failed: ${err.message}`);
-    throw new Error(`Invalid or corrupted PDF: ${err.message}`);
-  }
-
-  try {
-    const cv = new Converter(inputPath);
-    await new Promise((resolve, reject) => {
-      cv.convert(outputPath, (err) => {
-        if (err) {
-          console.error(`pdf2docx conversion error: ${err.message}`);
-          reject(new Error(`pdf2docx conversion failed: ${err.message}`));
-        } else {
-          console.log(`pdf2docx conversion succeeded: ${outputPath}`);
-          resolve();
-        }
-      });
-      cv.close();
-    });
-  } catch (err) {
-    console.error(`pdf2docx conversion failed: ${err.message}`);
-    throw err;
-  }
-}
-
-// Helper function for Pandoc conversion (fallback for PDF to DOCX)
-async function tryPandocConversion(inputPath, outputPath, format) {
-  console.log(`Attempting Pandoc conversion for ${inputPath} to ${outputPath} (${format})`);
-  try {
-    await execPromise(`pandoc "${inputPath}" -o "${outputPath}"`, {
-      env: { ...process.env, HOME: '/home/officeuser', USER: 'officeuser', XDG_RUNTIME_DIR: '/app/tmp/officeuser-runtime' },
-      timeout: 180000,
-    });
-    console.log(`Pandoc conversion succeeded: ${outputPath}`);
-  } catch (err) {
-    console.error(`Pandoc conversion failed: ${err.message}, stderr: ${err.stderr || 'none'}`);
-    throw err;
-  }
-}
-
-// Helper functions for LibreOffice-based conversions (fallback)
 async function tryUnoconvConversion(inputPath, outputPath, format) {
   const command = `/usr/bin/unoconv -f ${format} -o "${outputPath}" "${inputPath}"`;
   console.log(`Attempting unoconv conversion: ${command}`);

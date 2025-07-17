@@ -37,7 +37,6 @@ RUN apt-get update && apt-get install -y \
 
 # Install Python packages with specific versions for compatibility
 RUN pip3 install --no-cache-dir \
-    pdf2docx==0.5.8 \
     PyMuPDF==1.24.10 \
     python-docx==1.1.2 \
     Pillow==10.4.0 \
