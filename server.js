@@ -77,11 +77,12 @@ const tempDir = path.join('/app', 'tmp');
   try {
     for (const dir of [uploadsDir, convertedDir, tempDir]) {
       await fsPromises.mkdir(dir, { recursive: true, mode: 0o777 });
-      await fsPromises.chown(dir, 1000, 1000); // Ensure officeuser ownership
-      console.log(`Directory created and permissions set: ${dir}`);
+      // Verify directory is accessible
+      await fsPromises.access(dir, fs.constants.R_OK | fs.constants.W_OK);
+      console.log(`Directory created and verified: ${dir}`);
     }
   } catch (err) {
-    console.error('Error creating directories:', err.message);
+    console.error('Error setting up directories:', err.message);
     process.exit(1);
   }
 })();
@@ -155,16 +156,15 @@ app.get('/status', async (req, res) => {
       }),
     },
     {
-      name: 'unoconv',
+      name: 'Python (pdf2docx)',
       check: () => new Promise((resolve) => {
-        const librePath = process.env.LIBREOFFICE_PATH || '/usr/bin/unoconv';
-        exec(`${librePath} --version`, (err, stdout, stderr) => {
+        exec('python3 -c "import pdf2docx; print(pdf2docx.__version__)"', (err, stdout, stderr) => {
           if (err) {
-            console.error('unoconv check failed:', err.message, stderr);
-            return resolve({ name: 'unoconv', status: 'Failed', details: err.message });
+            console.error('pdf2docx check failed:', err.message, stderr);
+            return resolve({ name: 'pdf2docx', status: 'Failed', details: err.message });
           }
-          console.log('unoconv version:', stdout.split('\n')[0]);
-          resolve({ name: 'unoconv', status: 'OK', details: stdout.split('\n')[0] });
+          console.log('pdf2docx version:', stdout.split('\n')[0]);
+          resolve({ name: 'pdf2docx', status: 'OK', details: stdout.split('\n')[0] });
         });
       }),
     },
@@ -483,7 +483,7 @@ async function convertPdf(inputPath, outputPath, format) {
 async function convertDocument(inputPath, outputPath, format) {
   const inputExt = path.extname(inputPath).toLowerCase().slice(1);
   const supportedDocumentFormats = ['docx', 'pdf', 'txt', 'rtf', 'odt'];
-  
+
   // Pre-processing for non-document files
   if (['bmp', 'eps', 'gif', 'ico', 'png', 'svg', 'tga', 'tiff', 'wbmp', 'webp', 'jpg', 'jpeg'].includes(inputExt)) {
     const tempPdfPath = path.join(tempDir, `temp_${Date.now()}.pdf`);
@@ -502,7 +502,19 @@ async function convertDocument(inputPath, outputPath, format) {
     throw new Error(`Unsupported output document format: ${format}`);
   }
 
-  // Try multiple conversion methods with fallbacks
+  // Handle PDF to DOCX using pdf2docx
+  if (inputExt === 'pdf' && format === 'docx') {
+    try {
+      await convertPdfToDocx(inputPath, outputPath);
+      console.log(`PDF to DOCX conversion succeeded: ${outputPath}`);
+      return;
+    } catch (err) {
+      console.error(`PDF to DOCX conversion failed: ${err.message}`);
+      throw new Error(`PDF to DOCX conversion failed: ${err.message}`);
+    }
+  }
+
+  // Fallback to LibreOffice for other document conversions
   try {
     // Method 1: unoconv (primary)
     await tryUnoconvConversion(inputPath, outputPath, format);
@@ -520,17 +532,7 @@ async function convertDocument(inputPath, outputPath, format) {
   }
 
   try {
-    // Method 3: pdftodoc (fallback)
-    if (format === 'docx') {
-      await tryPdfToDoc(inputPath, outputPath);
-      return;
-    }
-  } catch (pdftodocError) {
-    console.warn(`pdftodoc failed: ${pdftodocError.message}`);
-  }
-
-  try {
-    // Method 4: Ghostscript + Pandoc if available
+    // Method 3: Ghostscript + Pandoc if available
     await tryGhostscriptPandoc(inputPath, outputPath, format);
     return;
   } catch (finalError) {
@@ -539,7 +541,54 @@ async function convertDocument(inputPath, outputPath, format) {
   }
 }
 
-// Helper functions for different conversion methods
+// Helper function for PDF to DOCX using pdf2docx
+async function convertPdfToDocx(inputPath, outputPath) {
+  console.log(`Attempting pdf2docx conversion for ${inputPath} to ${outputPath}`);
+  
+  const pythonScript = `
+from pdf2docx import Converter
+import sys
+import logging
+
+logging.basicConfig(level=logging.INFO)
+
+pdf_file = sys.argv[1]
+docx_file = sys.argv[2]
+
+try:
+    cv = Converter(pdf_file)
+    cv.convert(docx_file, start=0, end=None)
+    cv.close()
+    print(f"Conversion successful: {docx_file}")
+except Exception as e:
+    print(f"Error: {str(e)}", file=sys.stderr)
+    sys.exit(1)
+`;
+
+  const tempScriptPath = path.join(tempDir, `pdf2docx_${Date.now()}.py`);
+  await fsPromises.writeFile(tempScriptPath, pythonScript);
+
+  try {
+    const { stdout, stderr } = await execPromise(`python3 ${tempScriptPath} "${inputPath}" "${outputPath}"`, {
+      env: {
+        ...process.env,
+        HOME: '/home/officeuser',
+        USER: 'officeuser',
+        XDG_RUNTIME_DIR: '/app/tmp/officeuser-runtime',
+      },
+      timeout: 180000,
+    });
+    if (stderr) console.warn(`pdf2docx stderr: ${stderr}`);
+    console.log(`pdf2docx stdout: ${stdout}`);
+  } catch (err) {
+    console.error(`pdf2docx conversion failed: ${err.message}`);
+    throw err;
+  } finally {
+    await fsPromises.unlink(tempScriptPath).catch(err => console.error(`Error cleaning up temp script: ${err.message}`));
+  }
+}
+
+// Helper functions for LibreOffice-based conversions (fallback)
 async function tryUnoconvConversion(inputPath, outputPath, format) {
   const command = `/usr/bin/unoconv -f ${format} -o "${outputPath}" "${inputPath}"`;
   console.log(`Attempting unoconv conversion: ${command}`);
@@ -587,35 +636,6 @@ async function tryLibreOfficeConvert(inputPath, outputPath, format) {
         });
     });
   });
-}
-
-async function tryPdfToDoc(inputPath, outputPath) {
-  console.log(`Attempting pdftodoc conversion`);
-  
-  const tempDirPath = await fsPromises.mkdtemp(path.join(tempDir, 'pdftodoc-'));
-  const tempHtmlPath = path.join(tempDirPath, 'output.html');
-  
-  try {
-    // First convert PDF to HTML
-    await execPromise(`pdftohtml -c -noframes "${inputPath}" "${tempHtmlPath}"`, {
-      env: { ...process.env, HOME: '/home/officeuser', USER: 'officeuser' }
-    });
-    
-    // Then convert HTML to DOCX using pandoc if available
-    try {
-      await execPromise(`pandoc -s "${tempHtmlPath}" -o "${outputPath}"`, {
-        env: { ...process.env, HOME: '/home/officeuser', USER: 'officeuser' }
-      });
-    } catch {
-      // Fallback to simple copy if pandoc not available
-      await fsPromises.copyFile(tempHtmlPath, outputPath);
-    }
-    
-    console.log(`pdftodoc conversion succeeded: ${outputPath}`);
-  } finally {
-    // Cleanup
-    await fsPromises.rm(tempDirPath, { recursive: true }).catch(err => console.error(`Error cleaning up temp dir: ${err.message}`));
-  }
 }
 
 async function tryGhostscriptPandoc(inputPath, outputPath, format) {
@@ -774,7 +794,7 @@ async function cleanupFiles(filePaths) {
   await Promise.all(cleanupPromises);
 }
 
-// Start LibreOffice in headless mode with retry mechanism
+// Start LibreOffice in headless mode with retry mechanism (for non-PDF-to-DOCX conversions)
 async function startLibreOffice() {
   const maxRetries = 3;
   let attempts = 0;
