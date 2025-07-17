@@ -9,11 +9,11 @@ const fs = require('fs');
 const fsPromises = fs.promises;
 const path = require('path');
 const cors = require('cors');
-const imagemagick = require('imagemagick');
 const { optimize } = require('svgo');
 const sevenZip = require('node-7z');
 const { exec } = require('child_process');
 const tmp = require('tmp');
+const { fromPath } = require('pdf2pic');
 
 // Log FFmpeg availability
 try {
@@ -46,7 +46,6 @@ app.use(cors({
             'http://localhost:5173',
             process.env.FRONTEND_URL || 'https://convertors-frontend.onrender.com'
         ].filter(Boolean);
-        
         console.log(`CORS: Request from origin ${origin || 'undefined'}`);
         if (!origin || allowedOrigins.includes(origin)) {
             console.log(`CORS: Allowing origin ${origin || 'undefined'}`);
@@ -62,7 +61,6 @@ app.use(cors({
     optionsSuccessStatus: 204,
 }));
 
-// Handle OPTIONS preflight requests
 app.options('*', cors());
 
 // Use /app for Render's filesystem
@@ -164,15 +162,15 @@ app.get('/status', (req, res) => {
             }),
         },
         {
-            name: 'ImageMagick',
+            name: 'Ghostscript',
             check: () => new Promise((resolve) => {
-                exec('convert -version', (err, stdout, stderr) => {
+                exec('gs --version', (err, stdout, stderr) => {
                     if (err) {
-                        console.error('ImageMagick check failed:', err.message, stderr);
-                        return resolve({ name: 'ImageMagick', status: 'Failed', details: err.message });
+                        console.error('Ghostscript check failed:', err.message, stderr);
+                        return resolve({ name: 'Ghostscript', status: 'Failed', details: err.message });
                     }
-                    console.log('ImageMagick version:', stdout.split('\n')[0]);
-                    resolve({ name: 'ImageMagick', status: 'OK', details: stdout.split('\n')[0] });
+                    console.log('Ghostscript version:', stdout.split('\n')[0]);
+                    resolve({ name: 'Ghostscript', status: 'OK', details: stdout.split('\n')[0] });
                 });
             }),
         },
@@ -220,7 +218,8 @@ const supportedFormats = {
 const sanitizeFilename = (filename) => {
     return filename
         .replace(/[^a-zA-Z0-9-_.]/g, '') // Remove invalid characters
-        .replace(/\s+/g, '_'); // Replace spaces with underscores
+        .replace(/\s+/g, '_') // Replace spaces with underscores
+        .slice(0, 100); // Limit filename length
 };
 
 app.post('/api/convert', upload.array('files', 5), async (req, res) => {
@@ -271,7 +270,7 @@ app.post('/api/convert', upload.array('files', 5), async (req, res) => {
             const inputPath = file.path;
             const outputPath = path.join(
                 convertedDir,
-                `${sanitizeFilename(path.basename(file.filename, path.extname(file.filename)))}_${Date.now()}.${outputExt}`
+                `${sanitizeFilename(path.basename(file.originalname, path.extname(file.originalname)))}_${Date.now()}.${outputExt}`
             );
             try {
                 await fsPromises.access(inputPath);
@@ -281,7 +280,7 @@ app.post('/api/convert', upload.array('files', 5), async (req, res) => {
             const outputType = ['bmp', 'eps', 'gif', 'ico', 'png', 'svg', 'tga', 'tiff', 'wbmp', 'webp', 'jpg', 'jpeg'].includes(outputExt) ? 'image' :
                 ['pdf', 'docx', 'txt', 'rtf', 'odt'].includes(outputExt) ? 'document' :
                 ['mp3', 'wav', 'aac', 'flac', 'ogg', 'opus', 'wma', 'aiff', 'm4v', 'mmf', '3g2'].includes(outputExt) ? 'audio' :
-                ['mp4', 'avi', 'mov', 'webm', 'mkv', 'flv', 'wmw'].includes(outputExt) ? 'video' : formatInfo.type;
+                ['mp4', 'avi', 'mov', 'webm', 'mkv', 'flv', 'wmv'].includes(outputExt) ? 'video' : formatInfo.type;
             switch (outputType) {
                 case 'image':
                 case 'compressor':
@@ -318,7 +317,7 @@ app.post('/api/convert', upload.array('files', 5), async (req, res) => {
         res.json({
             files: outputFiles.map(file => ({
                 name: file.name,
-                path: `/converted/${file.name}`,
+                path: `/converted/${encodeURIComponent(file.name)}`,
                 id: file.id,
             })),
         });
@@ -410,7 +409,7 @@ async function convertImage(inputPath, outputPath, format, subSection) {
             console.log(`Image conversion (Sharp) completed: ${outputPath}`);
         } else {
             await new Promise((resolve, reject) => {
-                imagemagick.convert([inputPath, outputPath], (err) => {
+                exec(`convert "${inputPath}" "${outputPath}"`, (err) => {
                     if (err) {
                         console.error(`ImageMagick conversion failed for ${format}: ${err.message}`);
                         return reject(new Error(`Image conversion failed: ${err.message}`));
@@ -422,7 +421,7 @@ async function convertImage(inputPath, outputPath, format, subSection) {
         }
     } else if (format === 'pdf') {
         await new Promise((resolve, reject) => {
-            imagemagick.convert([inputPath, outputPath], (err) => {
+            exec(`convert "${inputPath}" "${outputPath}"`, (err) => {
                 if (err) {
                     console.error(`Image to PDF conversion failed: ${err.message}`);
                     return reject(new Error(`Image to PDF conversion failed: ${err.message}`));
@@ -454,16 +453,19 @@ async function convertPdf(inputPath, outputPath, format) {
         return;
     }
     if (['jpg', 'png', 'gif'].includes(format)) {
-        await new Promise((resolve, reject) => {
-            imagemagick.convert([inputPath, outputPath], (err) => {
-                if (err) {
-                    console.error(`PDF to ${format} conversion failed: ${err.message}`);
-                    return reject(new Error(`PDF to ${format} conversion failed: ${err.message}`));
-                }
-                console.log(`PDF to ${format} conversion completed: ${outputPath}`);
-                resolve();
+        try {
+            const output = fromPath(inputPath, {
+                density: 100,
+                format: format,
+                outputDir: path.dirname(outputPath),
+                outputName: path.basename(outputPath, `.${format}`)
             });
-        });
+            await output.bulk(-1);
+            console.log(`PDF to ${format} conversion completed: ${outputPath}`);
+        } catch (err) {
+            console.error(`PDF to ${format} conversion failed: ${err.message}`);
+            throw new Error(`PDF to ${format} conversion failed: ${err.message}`);
+        }
     } else if (['docx', 'txt', 'rtf', 'odt'].includes(format)) {
         await convertDocument(inputPath, outputPath, format);
     } else {
@@ -511,51 +513,68 @@ async function convertMedia(inputPath, outputPath, format, inputExt) {
     if (!supportedAudioFormats.includes(format) && !supportedVideoFormats.includes(format)) {
         throw new Error(`Unsupported media output format: ${format}`);
     }
-    return new Promise((resolve, reject) => {
-        const ffmpegInstance = ffmpeg(inputPath);
-        const isAudioInput = ['mp3', 'wav', 'aac', 'flac', 'ogg', 'opus', 'wma', 'aiff', 'mmf'].includes(inputExt);
-        const isVideoOutput = supportedVideoFormats.includes(format);
+    try {
+        // Try fluent-ffmpeg first
+        await new Promise((resolve, reject) => {
+            const ffmpegInstance = ffmpeg(inputPath);
+            const isAudioInput = ['mp3', 'wav', 'aac', 'flac', 'ogg', 'opus', 'wma', 'aiff', 'mmf'].includes(inputExt);
+            const isVideoOutput = supportedVideoFormats.includes(format);
 
-        if (isVideoOutput && isAudioInput) {
-            ffmpegInstance
-                .input('color=c=black:s=320x240:r=25')
-                .inputFormat('lavfi')
-                .videoCodec('mpeg4')
-                .audioCodec('aac')
-                .outputOptions('-shortest', '-threads 1', '-preset ultrafast');
-        } else {
-            if (format === 'aac') {
-                ffmpegInstance.audioCodec('aac');
-            } else if (format === 'wma') {
-                ffmpegInstance.audioCodec('wmav2');
-            } else if (format === 'm4v' || format === '3g2') {
+            if (isVideoOutput && isAudioInput) {
                 ffmpegInstance
+                    .input('color=c=black:s=320x240:r=25')
+                    .inputFormat('lavfi')
                     .videoCodec('mpeg4')
-                    .audioCodec('aac');
-            } else if (format === 'mmf') {
-                ffmpegInstance.audioCodec('pcm_s16le');
-            } else if (supportedVideoFormats.includes(format)) {
-                ffmpegInstance
-                    .videoCodec('libx264')
-                    .audioCodec('aac');
+                    .audioCodec('aac')
+                    .outputOptions('-shortest', '-threads 1', '-preset ultrafast');
+            } else {
+                if (format === 'aac') {
+                    ffmpegInstance.audioCodec('aac');
+                } else if (format === 'wma') {
+                    ffmpegInstance.audioCodec('wmav2');
+                } else if (format === 'm4v' || format === '3g2') {
+                    ffmpegInstance
+                        .videoCodec('mpeg4')
+                        .audioCodec('aac');
+                } else if (format === 'mmf') {
+                    ffmpegInstance.audioCodec('pcm_s16le');
+                } else if (supportedVideoFormats.includes(format)) {
+                    ffmpegInstance
+                        .videoCodec('libx264')
+                        .audioCodec('aac');
+                }
             }
-        }
 
-        ffmpegInstance
-            .outputOptions('-threads 1', '-preset ultrafast')
-            .toFormat(format)
-            .on('start', (cmd) => console.log(`FFmpeg command: ${cmd}`))
-            .on('progress', (progress) => console.log(`Processing: ${progress.percent}% done`))
-            .on('end', () => {
-                console.log(`Media conversion completed: ${outputPath}`);
+            ffmpegInstance
+                .outputOptions('-threads 1', '-preset ultrafast')
+                .toFormat(format)
+                .on('start', (cmd) => console.log(`FFmpeg command: ${cmd}`))
+                .on('progress', (progress) => console.log(`Processing: ${progress.percent}% done`))
+                .on('end', () => {
+                    console.log(`Media conversion completed: ${outputPath}`);
+                    resolve();
+                })
+                .on('error', (err, stdout, stderr) => {
+                    console.error(`Fluent-FFmpeg conversion error for ${format}: ${err.message}`, { stdout, stderr });
+                    reject(err);
+                })
+                .save(outputPath);
+        });
+    } catch (err) {
+        console.warn(`Fluent-FFmpeg failed, falling back to direct FFmpeg: ${err.message}`);
+        // Fallback to direct FFmpeg command
+        await new Promise((resolve, reject) => {
+            const cmd = `ffmpeg -i "${inputPath}" -threads 1 -preset ultrafast "${outputPath}"`;
+            exec(cmd, (err, stdout, stderr) => {
+                if (err) {
+                    console.error(`Direct FFmpeg conversion failed for ${format}: ${err.message}`, { stdout, stderr });
+                    return reject(new Error(`Media conversion failed: ${err.message}`));
+                }
+                console.log(`Direct FFmpeg conversion completed: ${outputPath}`);
                 resolve();
-            })
-            .on('error', (err, stdout, stderr) => {
-                console.error(`Media conversion error for ${format}: ${err.message}`, { stdout, stderr });
-                reject(new Error(`Media conversion failed: ${err.message}`));
-            })
-            .save(outputPath);
-    });
+            });
+        });
+    }
 }
 
 async function convertArchive(inputPath, outputPath, format) {

@@ -4,7 +4,7 @@ FROM node:18-bullseye
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     libreoffice \
-    imagemagick \
+    ghostscript \
     calibre \
     unoconv \
     p7zip-full \
