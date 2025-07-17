@@ -43,13 +43,15 @@ RUN pip3 install --no-cache-dir \
     numpy==1.26.4 \
     opencv-python==4.10.0.84
 
-# Create a non-root user for LibreOffice and set up directories
+# Create directories and set permissions as root
+RUN mkdir -p /app/Uploads /app/converted /app/tmp /app/tmp/officeuser-runtime \
+    && chmod -R 777 /app /app/Uploads /app/converted /app/tmp /app/tmp/officeuser-runtime
+
+# Create a non-root user for LibreOffice
 RUN useradd -m -u 1001 -s /bin/bash officeuser || echo "User officeuser creation failed, using existing user" \
     && mkdir -p /home/officeuser/.config/libreoffice/4/user \
-    && mkdir -p /app/tmp/officeuser-runtime \
-    && mkdir -p /app/Uploads /app/converted /app/tmp \
     && chown -R officeuser:officeuser /home/officeuser /app \
-    && chmod -R 777 /app/Uploads /app/converted /app/tmp /app/tmp/officeuser-runtime
+    && chmod -R 777 /home/officeuser /app
 
 # Set working directory
 WORKDIR /app

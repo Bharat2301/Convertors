@@ -42,6 +42,9 @@ console.log('Environment variables:', {
   FRONTEND_URL: process.env.FRONTEND_URL,
   CONVERSION_TIMEOUT: process.env.CONVERSION_TIMEOUT,
   LIBREOFFICE_PATH: process.env.LIBREOFFICE_PATH,
+  HOME: process.env.HOME,
+  USER: process.env.USER,
+  XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR
 });
 
 // Enhanced CORS configuration
@@ -76,10 +79,16 @@ const tempDir = path.join('/app', 'tmp');
 // Ensure directories exist with correct permissions
 (async () => {
   try {
-    for (const dir of [uploadsDir, convertedDir, tempDir]) {
-      await fsPromises.mkdir(dir, { recursive: true, mode: 0o777 });
-      await fsPromises.access(dir, fs.constants.R_OK | fs.constants.W_OK);
-      console.log(`Directory created and verified: ${dir}`);
+    for (const dir of [uploadsDir, convertedDir, tempDir, '/app/tmp/officeuser-runtime']) {
+      try {
+        await fsPromises.mkdir(dir, { recursive: true, mode: 0o777 });
+        await fsPromises.chmod(dir, 0o777);
+        await fsPromises.access(dir, fs.constants.R_OK | fs.constants.W_OK);
+        console.log(`Directory created and verified: ${dir}`);
+      } catch (err) {
+        console.error(`Failed to set up directory ${dir}: ${err.message}`);
+        throw new Error(`Directory setup failed for ${dir}: ${err.message}`);
+      }
     }
   } catch (err) {
     console.error('Error setting up directories:', err.message);
@@ -733,7 +742,8 @@ async function cleanupFiles(filePaths) {
 
 // Start LibreOffice in headless mode with retry mechanism
 async function startLibreOffice() {
-  const maxRetries = 3;
+  const maxRetries = 5;
+  const timeout = 60000; // Increased to 60 seconds
   let attempts = 0;
   while (attempts < maxRetries) {
     try {
@@ -747,7 +757,7 @@ async function startLibreOffice() {
             USER: 'officeuser',
             XDG_RUNTIME_DIR: '/app/tmp/officeuser-runtime',
           },
-          timeout: 30000,
+          timeout,
         }
       );
       console.log('LibreOffice started successfully');
@@ -764,12 +774,18 @@ async function startLibreOffice() {
   }
 }
 
-// Start LibreOffice before the server
-startLibreOffice().then(() => {
-  app.listen(port, '0.0.0.0', () => {
-    console.log(`Server running on http://0.0.0.0:${port}`);
-  });
-}).catch(err => {
-  console.error('Failed to start server due to LibreOffice error:', err);
-  process.exit(1);
-});
+// Start LibreOffice and server with delay
+(async () => {
+  try {
+    await startLibreOffice();
+    // Delay server start to ensure directories and LibreOffice are ready
+    setTimeout(() => {
+      app.listen(port, '0.0.0.0', () => {
+        console.log(`Server running on http://0.0.0.0:${port}`);
+      });
+    }, 5000);
+  } catch (err) {
+    console.error('Failed to start server due to LibreOffice error:', err);
+    process.exit(1);
+  }
+})();
