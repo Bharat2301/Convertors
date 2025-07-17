@@ -551,7 +551,7 @@ async function tryUnoconvConversion(inputPath, outputPath, format) {
         ...process.env,
         HOME: '/home/officeuser',
         USER: 'officeuser',
-        XDG_RUNTIME_DIR: '/tmp/officeuser-runtime',
+        XDG_RUNTIME_DIR: '/app/tmp/officeuser-runtime',
       }
     });
     if (stderr) console.warn(`unoconv stderr: ${stderr}`);
@@ -788,7 +788,7 @@ async function startLibreOffice() {
             ...process.env,
             HOME: '/home/officeuser',
             USER: 'officeuser',
-            XDG_RUNTIME_DIR: '/tmp/officeuser-runtime',
+            XDG_RUNTIME_DIR: '/app/tmp/officeuser-runtime',
           },
           timeout: 30000,
         }
